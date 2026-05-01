@@ -10,6 +10,8 @@ const DATA_DIR = join(__dirname, "data");
 const SQLITE_FILE = join(DATA_DIR, "money-tracker.sqlite");
 const LEGACY_JSON_FILE = join(DATA_DIR, "db.json");
 const PORT = process.env.PORT || 4000;
+const DATABASE_URL =
+  process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL || "";
 
 const app = express();
 app.use(cors());
@@ -324,9 +326,9 @@ async function createSqliteStore() {
 
 async function createPostgresStore() {
   const { Pool } = await import("pg");
-  const isLocal = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL || "");
+  const isLocal = /localhost|127\.0\.0\.1/.test(DATABASE_URL);
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: DATABASE_URL,
     ssl: isLocal ? false : { rejectUnauthorized: false }
   });
 
@@ -477,10 +479,50 @@ async function createPostgresStore() {
   };
 }
 
-const store = process.env.DATABASE_URL ? await createPostgresStore() : await createSqliteStore();
+function createMissingDatabaseStore() {
+  const error = new Error(
+    "DATABASE_URL is not configured. Add Neon/Postgres to this Vercel project."
+  );
+  error.statusCode = 503;
+
+  return {
+    kind: "missing",
+    async findUserById() {
+      throw error;
+    },
+    async findUserByEmail() {
+      throw error;
+    },
+    async createUser() {
+      throw error;
+    },
+    async getBundle() {
+      throw error;
+    },
+    async addTransaction() {
+      throw error;
+    },
+    async listTransactions() {
+      throw error;
+    },
+    async listUsers() {
+      throw error;
+    }
+  };
+}
+
+const store = DATABASE_URL
+  ? await createPostgresStore()
+  : process.env.VERCEL
+    ? createMissingDatabaseStore()
+    : await createSqliteStore();
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, database: store.kind });
+  res.json({
+    ok: store.kind !== "missing",
+    database: store.kind,
+    has_database_url: Boolean(DATABASE_URL)
+  });
 });
 
 async function createUser(req, res, { requirePassword }) {
@@ -637,7 +679,7 @@ app.get("/api/users", async (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(500).json({ error: "Server error." });
+  res.status(error.statusCode || 500).json({ error: error.message || "Server error." });
 });
 
 export default app;
