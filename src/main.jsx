@@ -9,3 +9,11 @@ createRoot(document.getElementById("root")).render(
     <App icons={{ ArrowDownCircle, ArrowUpCircle, LogOut, MinusCircle, Plus }} />
   </React.StrictMode>
 );
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // The app still works normally if service workers are unavailable on local HTTP.
+    });
+  });
+}

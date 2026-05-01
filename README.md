@@ -13,6 +13,23 @@ Frontend: `http://localhost:5173`
 
 Backend: `http://localhost:4000`
 
+## Phone Testing
+
+While `npm run dev` is running, open the network URL shown by Vite on a phone connected to the same Wi-Fi, for example:
+
+```text
+http://192.168.1.210:5173/
+```
+
+The app is PWA-ready with a manifest, icons, and service worker.
+
+For install testing:
+
+- Android Chrome: open the HTTPS or localhost URL, then use **Install app** or **Add to Home screen**.
+- iPhone Safari: open the HTTPS URL, tap Share, then **Add to Home Screen**.
+
+Note: mobile browsers usually require HTTPS for full PWA install/service-worker behavior. The local network HTTP URL is good for UI testing; use an HTTPS deployment or tunnel for true install testing.
+
 ## API
 
 - `POST /api/auth/signup`
@@ -42,9 +59,9 @@ Recent entries use API pagination. When `page` and `limit` are provided, the res
 
 ## Database
 
-The MVP uses SQLite through Node's built-in SQLite module.
+Local development uses SQLite through Node's built-in SQLite module.
 
-Data is stored locally in:
+Local data is stored in:
 
 ```text
 server/data/money-tracker.sqlite
@@ -57,3 +74,23 @@ Tables:
 - `transactions`
 
 No separate database server is needed. If an old `server/data/db.json` exists, the server migrates it into SQLite when the SQLite database is empty.
+
+For production, set `DATABASE_URL` to a Postgres database connection string. The API automatically uses Postgres when `DATABASE_URL` exists, which is the recommended setup for Vercel.
+
+## Vercel Deployment
+
+This project is Vercel-ready:
+
+- Frontend builds to `dist`
+- API is served by `api/index.js`
+- Routes are configured in `vercel.json`
+- PWA install works best from the deployed HTTPS URL
+
+Recommended production database:
+
+1. Create a Vercel project from this repo.
+2. Add a Neon Postgres integration from Vercel Marketplace.
+3. Make sure `DATABASE_URL` is available in Vercel environment variables.
+4. Deploy.
+
+Vercel is good for HTTPS/PWA install testing. SQLite is kept for local development only.

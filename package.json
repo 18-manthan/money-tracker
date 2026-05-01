@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "client": "vite --host 0.0.0.0",
@@ -16,6 +19,7 @@
     "concurrently": "^9.2.1",
     "cors": "^2.8.5",
     "express": "^5.2.1",
+    "pg": "^8.16.3",
     "vite": "^7.3.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
