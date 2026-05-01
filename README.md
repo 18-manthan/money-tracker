@@ -39,10 +39,11 @@ Note: mobile browsers usually require HTTPS for full PWA install/service-worker 
 - `POST /api/create-user`
 - `GET /api/users/me?user_id=...`
 - `POST /api/transaction/add`
+- `POST /api/transaction/delete`
 - `GET /api/transactions/list?user_id=...&page=1&limit=5`
 - `GET /api/dashboard/business?user_id=...`
 - `GET /api/dashboard/personal?user_id=...`
-- `GET /api/summary/last-3-days?user_id=...`
+- `GET /api/summary/month?user_id=...`
 
 Signup payload:
 

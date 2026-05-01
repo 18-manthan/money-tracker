@@ -8,7 +8,8 @@ import {
   Moon,
   MinusCircle,
   Plus,
-  Sun
+  Sun,
+  Trash2
 } from "lucide-react";
 import "./styles.css";
 import App from "./App.jsx";
@@ -24,7 +25,8 @@ createRoot(document.getElementById("root")).render(
         Moon,
         MinusCircle,
         Plus,
-        Sun
+        Sun,
+        Trash2
       }}
     />
   </React.StrictMode>

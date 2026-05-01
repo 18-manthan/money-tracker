@@ -97,16 +97,15 @@ function startOfDay(date) {
   return value;
 }
 
-function last3DaySummary(transactions) {
+function monthlySummary(transactions) {
   const now = startOfDay(new Date());
-  const threeDaysAgo = new Date(now);
-  threeDaysAgo.setDate(now.getDate() - 2);
-  const previousWindowStart = new Date(threeDaysAgo);
-  previousWindowStart.setDate(threeDaysAgo.getDate() - 3);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
   const inWindow = (txn, start, end) => {
     const txnDate = startOfDay(`${txn.date}T00:00:00`);
-    return txnDate >= start && txnDate <= end;
+    return txnDate >= start && txnDate < end;
   };
 
   const sum = (items) =>
@@ -118,23 +117,20 @@ function last3DaySummary(transactions) {
       { sale: 0, purchase: 0, expense: 0, income: 0 }
     );
 
-  const current = sum(transactions.filter((txn) => inWindow(txn, threeDaysAgo, now)));
-  const previousEnd = new Date(threeDaysAgo);
-  previousEnd.setDate(threeDaysAgo.getDate() - 1);
-  const previous = sum(
-    transactions.filter((txn) => inWindow(txn, previousWindowStart, previousEnd))
-  );
+  const current = sum(transactions.filter((txn) => inWindow(txn, monthStart, nextMonthStart)));
+  const previous = sum(transactions.filter((txn) => inWindow(txn, previousMonthStart, monthStart)));
 
   const currentProfit = current.sale - (current.purchase + current.expense);
   const previousProfit = previous.sale - (previous.purchase + previous.expense);
   const difference = toMoney(currentProfit - previousProfit);
 
   return {
-    from: threeDaysAgo.toISOString().slice(0, 10),
+    from: monthStart.toISOString().slice(0, 10),
     to: now.toISOString().slice(0, 10),
     total_sales: toMoney(current.sale),
     total_purchases: toMoney(current.purchase),
     total_expenses: toMoney(current.expense),
+    total_income: toMoney(current.income),
     net_profit_loss: toMoney(currentProfit),
     trend: difference > 0 ? "increase" : difference < 0 ? "decrease" : "no change",
     trend_difference: difference
@@ -325,6 +321,15 @@ async function createSqliteStore() {
           transaction.created_at
         );
     },
+    async deleteTransaction({ userId, transactionId }) {
+      const transaction = sqlite
+        .prepare("SELECT * FROM transactions WHERE id = ? AND user_id = ?")
+        .get(transactionId, userId);
+      if (!transaction) return null;
+
+      sqlite.prepare("DELETE FROM transactions WHERE id = ? AND user_id = ?").run(transactionId, userId);
+      return transaction;
+    },
     async listTransactions({ userId, page, limit }) {
       const whereSql = userId ? "WHERE user_id = ?" : "";
       const params = userId ? [userId] : [];
@@ -492,6 +497,13 @@ async function createPostgresStore() {
         ]
       );
     },
+    async deleteTransaction({ userId, transactionId }) {
+      const result = await pool.query(
+        "DELETE FROM transactions WHERE id = $1 AND user_id = $2 RETURNING *",
+        [transactionId, userId]
+      );
+      return result.rows[0] || null;
+    },
     async listTransactions({ userId, page, limit }) {
       const params = [];
       const whereSql = userId ? "WHERE user_id = $1" : "";
@@ -552,6 +564,9 @@ function createMissingDatabaseStore() {
       throw error;
     },
     async addTransaction() {
+      throw error;
+    },
+    async deleteTransaction() {
       throw error;
     },
     async listTransactions() {
@@ -678,7 +693,24 @@ app.post("/api/transaction/add", async (req, res) => {
   res.status(201).json({
     transaction,
     dashboard: calculateDashboard(updatedBundle),
-    summary: last3DaySummary(updatedBundle.transactions)
+    summary: monthlySummary(updatedBundle.transactions)
+  });
+});
+
+app.post("/api/transaction/delete", async (req, res) => {
+  const { user_id, transaction_id } = req.body;
+
+  if (!user_id) return res.status(400).json({ error: "user_id is required." });
+  if (!transaction_id) return res.status(400).json({ error: "transaction_id is required." });
+
+  const deleted = await store.deleteTransaction({ userId: user_id, transactionId: transaction_id });
+  if (!deleted) return res.status(404).json({ error: "Transaction not found." });
+
+  const updatedBundle = await store.getBundle(user_id);
+  res.json({
+    deleted,
+    dashboard: calculateDashboard(updatedBundle),
+    summary: monthlySummary(updatedBundle.transactions)
   });
 });
 
@@ -711,11 +743,18 @@ app.get("/api/dashboard/personal", async (req, res) => {
   res.json(calculateDashboard(bundle));
 });
 
+app.get("/api/summary/month", async (req, res) => {
+  const bundle = await store.getBundle(req.query.user_id);
+  if (!bundle) return res.status(404).json({ error: "User not found." });
+
+  res.json(monthlySummary(bundle.transactions));
+});
+
 app.get("/api/summary/last-3-days", async (req, res) => {
   const bundle = await store.getBundle(req.query.user_id);
   if (!bundle) return res.status(404).json({ error: "User not found." });
 
-  res.json(last3DaySummary(bundle.transactions));
+  res.json(monthlySummary(bundle.transactions));
 });
 
 app.get("/api/users/me", async (req, res) => {
@@ -738,6 +777,7 @@ export default app;
 
 const isDirectRun = import.meta.url === pathToFileURL(process.argv[1] || "").href;
 if (isDirectRun) {
+  const keepAlive = setInterval(() => {}, 1 << 30);
   const server = app.listen(PORT, () => {
     console.log(`Daily Money Flow API running on http://localhost:${PORT}`);
     console.log(
@@ -747,5 +787,8 @@ if (isDirectRun) {
     );
   });
 
-  process.on("SIGTERM", () => server.close(() => process.exit(0)));
+  process.on("SIGTERM", () => {
+    clearInterval(keepAlive);
+    server.close(() => process.exit(0));
+  });
 }

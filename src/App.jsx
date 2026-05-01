@@ -328,7 +328,7 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
   );
 }
 
-function TransactionList({ transactions, pagination, onPageChange }) {
+function TransactionList({ transactions, pagination, onPageChange, onDelete, deletingId, icons }) {
   if (!transactions.length) {
     return <p className="empty">No entries yet. Add the first one above.</p>;
   }
@@ -346,7 +346,18 @@ function TransactionList({ transactions, pagination, onPageChange }) {
               <strong>{txn.type}</strong>
               <span>{txn.description || txn.date}</span>
             </div>
-            <b>{formatMoney(txn.amount)}</b>
+            <div className="txn-actions">
+              <b>{formatMoney(txn.amount)}</b>
+              <button
+                className="delete-button"
+                type="button"
+                title={`Delete ${txn.type}`}
+                disabled={deletingId === txn.id}
+                onClick={() => onDelete(txn)}
+              >
+                <icons.Trash2 size={18} />
+              </button>
+            </div>
           </article>
         ))}
       </div>
@@ -384,6 +395,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [transactionPage, setTransactionPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, total_pages: 1, total: 0 });
   const [activeType, setActiveType] = useState(user.user_type === "business" ? "sale" : "expense");
+  const [deletingId, setDeletingId] = useState("");
   const [error, setError] = useState("");
   const transactionLimit = 5;
 
@@ -392,7 +404,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   async function refresh(page = transactionPage) {
     const [dashboardData, summaryData, transactionData] = await Promise.all([
       request(`${dashboardPath}?user_id=${user.id}`),
-      request(`/summary/last-3-days?user_id=${user.id}`),
+      request(`/summary/month?user_id=${user.id}`),
       request(`/transactions/list?user_id=${user.id}&page=${page}&limit=${transactionLimit}`)
     ]);
     setDashboard(dashboardData);
@@ -420,6 +432,34 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     setSummary(result.summary);
     setTransactionPage(1);
     refresh(1).catch((err) => setError(err.message));
+  }
+
+  async function handleDelete(txn) {
+    const confirmed = window.confirm(
+      `Delete this ${txn.type} of ${formatMoney(txn.amount)}?\n\nThis cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setDeletingId(txn.id);
+    setError("");
+    try {
+      const result = await request("/transaction/delete", {
+        method: "POST",
+        body: JSON.stringify({
+          user_id: user.id,
+          transaction_id: txn.id
+        })
+      });
+      setDashboard(result.dashboard);
+      setSummary(result.summary);
+      const nextPage =
+        transactions.length === 1 && transactionPage > 1 ? transactionPage - 1 : transactionPage;
+      await refresh(nextPage);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingId("");
+    }
   }
 
   if (error) {
@@ -489,36 +529,52 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
         <Stat label="Expenses" value={dashboard.total_expenses} tone="negative" />
       </section>
 
-      {user.user_type === "business" ? (
-        <section className="summary">
-          <div>
-            <span>Last 3 Days</span>
-            <strong>{formatMoney(summary.net_profit_loss)}</strong>
-          </div>
+      <section className="summary">
+        <div>
+          <span>This Month</span>
+          <strong>
+            {user.user_type === "business"
+              ? formatMoney(summary.net_profit_loss)
+              : formatMoney(summary.total_income - summary.total_expenses)}
+          </strong>
+        </div>
+        {user.user_type === "business" ? (
           <div className={`trend ${summary.trend.replace(" ", "-")}`}>
             {summary.trend} {formatMoney(Math.abs(summary.trend_difference))}
           </div>
-          <dl>
+        ) : null}
+        <dl>
+          {user.user_type === "business" ? (
+            <>
+              <div>
+                <dt>Sales</dt>
+                <dd>{formatMoney(summary.total_sales)}</dd>
+              </div>
+              <div>
+                <dt>Purchases</dt>
+                <dd>{formatMoney(summary.total_purchases)}</dd>
+              </div>
+            </>
+          ) : (
             <div>
-              <dt>Sales</dt>
-              <dd>{formatMoney(summary.total_sales)}</dd>
+              <dt>Added</dt>
+              <dd>{formatMoney(summary.total_income)}</dd>
             </div>
-            <div>
-              <dt>Purchases</dt>
-              <dd>{formatMoney(summary.total_purchases)}</dd>
-            </div>
-            <div>
-              <dt>Expenses</dt>
-              <dd>{formatMoney(summary.total_expenses)}</dd>
-            </div>
-          </dl>
-        </section>
-      ) : null}
+          )}
+          <div>
+            <dt>Expenses</dt>
+            <dd>{formatMoney(summary.total_expenses)}</dd>
+          </div>
+        </dl>
+      </section>
 
       <TransactionList
         transactions={transactions}
         pagination={pagination}
         onPageChange={setTransactionPage}
+        onDelete={handleDelete}
+        deletingId={deletingId}
+        icons={icons}
       />
     </main>
   );
