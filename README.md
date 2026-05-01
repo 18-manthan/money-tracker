@@ -23,6 +23,8 @@ http://192.168.1.210:5173/
 
 The app is PWA-ready with a manifest, icons, and service worker.
 
+The UI includes a light/dark mode toggle and remembers the choice on the device.
+
 For install testing:
 
 - Android Chrome: open the HTTPS or localhost URL, then use **Install app** or **Add to Home screen**.
@@ -35,6 +37,7 @@ Note: mobile browsers usually require HTTPS for full PWA install/service-worker 
 - `POST /api/auth/signup`
 - `POST /api/auth/login`
 - `POST /api/create-user`
+- `GET /api/users/me?user_id=...`
 - `POST /api/transaction/add`
 - `GET /api/transactions/list?user_id=...&page=1&limit=5`
 - `GET /api/dashboard/business?user_id=...`
@@ -56,6 +59,15 @@ Signup payload:
 Transaction descriptions are required for sale, purchase, and expense entries.
 
 Recent entries use API pagination. When `page` and `limit` are provided, the response includes `items`, `page`, `limit`, `total`, and `total_pages`.
+
+There is no public users-list endpoint. Inspect production users from the database dashboard, not from the public API.
+
+Transaction types:
+
+- `sale`: increases business balance and counts toward profit.
+- `purchase`: decreases business balance and counts against profit.
+- `expense`: decreases balance and counts against profit for business users.
+- `income`: adds money to balance for salary, bonus, owner cash, or capital. It does not count as profit.
 
 ## Database
 

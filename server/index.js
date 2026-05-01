@@ -64,17 +64,18 @@ function calculateDashboard(bundle) {
       acc[txn.type] += Number(txn.amount);
       return acc;
     },
-    { sale: 0, purchase: 0, expense: 0 }
+    { sale: 0, purchase: 0, expense: 0, income: 0 }
   );
 
   const totalSales = toMoney(totals.sale);
   const totalPurchases = toMoney(totals.purchase);
   const totalExpenses = toMoney(totals.expense);
+  const totalIncome = toMoney(totals.income);
   const profitLoss = toMoney(totalSales - (totalPurchases + totalExpenses));
   const currentBalance =
     bundle.user.user_type === "business"
-      ? toMoney(openingBalance + totalSales - totalPurchases - totalExpenses)
-      : toMoney(openingBalance - totalExpenses);
+      ? toMoney(openingBalance + totalIncome + totalSales - totalPurchases - totalExpenses)
+      : toMoney(openingBalance + totalIncome - totalExpenses);
 
   return {
     user: sanitizeUser(bundle.user),
@@ -85,6 +86,7 @@ function calculateDashboard(bundle) {
     total_sales: totalSales,
     total_purchases: totalPurchases,
     total_expenses: totalExpenses,
+    total_income: totalIncome,
     profit_loss: profitLoss
   };
 }
@@ -113,7 +115,7 @@ function last3DaySummary(transactions) {
         acc[txn.type] += Number(txn.amount);
         return acc;
       },
-      { sale: 0, purchase: 0, expense: 0 }
+      { sale: 0, purchase: 0, expense: 0, income: 0 }
     );
 
   const current = sum(transactions.filter((txn) => inWindow(txn, threeDaysAgo, now)));
@@ -167,7 +169,7 @@ async function createSqliteStore() {
     CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense')),
+      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
       amount REAL NOT NULL,
       description TEXT NOT NULL,
       date TEXT NOT NULL,
@@ -178,6 +180,37 @@ async function createSqliteStore() {
     CREATE INDEX IF NOT EXISTS idx_transactions_user_date
       ON transactions(user_id, date DESC, created_at DESC);
   `);
+
+  const transactionTable = sqlite
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transactions'")
+    .get();
+  if (transactionTable?.sql && !transactionTable.sql.includes("'income'")) {
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      ALTER TABLE transactions RENAME TO transactions_old;
+
+      CREATE TABLE transactions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
+        amount REAL NOT NULL,
+        description TEXT NOT NULL,
+        date TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      INSERT INTO transactions (id, user_id, type, amount, description, date, created_at)
+      SELECT id, user_id, type, amount, description, date, created_at
+      FROM transactions_old;
+
+      DROP TABLE transactions_old;
+      PRAGMA foreign_keys = ON;
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_user_date
+        ON transactions(user_id, date DESC, created_at DESC);
+    `);
+  }
 
   function migrateLegacyJson() {
     if (!existsSync(LEGACY_JSON_FILE)) return;
@@ -318,9 +351,6 @@ async function createSqliteStore() {
         .prepare(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, created_at DESC`)
         .all(...params);
     },
-    async listUsers() {
-      return sqlite.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
-    }
   };
 }
 
@@ -352,7 +382,7 @@ async function createPostgresStore() {
     CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense')),
+      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
       amount DOUBLE PRECISION NOT NULL,
       description TEXT NOT NULL,
       date TEXT NOT NULL,
@@ -361,6 +391,32 @@ async function createPostgresStore() {
 
     CREATE INDEX IF NOT EXISTS idx_transactions_user_date
       ON transactions(user_id, date DESC, created_at DESC);
+  `);
+
+  await pool.query(`
+    DO $$
+    DECLARE
+      constraint_name text;
+    BEGIN
+      SELECT con.conname INTO constraint_name
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      JOIN pg_namespace nsp ON nsp.oid = con.connamespace
+      WHERE rel.relname = 'transactions'
+        AND con.contype = 'c'
+        AND pg_get_constraintdef(con.oid) LIKE '%type%';
+
+      IF constraint_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE transactions DROP CONSTRAINT %I', constraint_name);
+      END IF;
+
+      ALTER TABLE transactions
+        ADD CONSTRAINT transactions_type_check
+        CHECK (type IN ('sale', 'purchase', 'expense', 'income'));
+    EXCEPTION
+      WHEN duplicate_object THEN
+        NULL;
+    END $$;
   `);
 
   return {
@@ -472,10 +528,6 @@ async function createPostgresStore() {
       );
       return result.rows;
     },
-    async listUsers() {
-      const result = await pool.query("SELECT * FROM users ORDER BY created_at DESC");
-      return result.rows;
-    }
   };
 }
 
@@ -505,9 +557,6 @@ function createMissingDatabaseStore() {
     async listTransactions() {
       throw error;
     },
-    async listUsers() {
-      throw error;
-    }
   };
 }
 
@@ -597,8 +646,8 @@ app.post("/api/transaction/add", async (req, res) => {
   const cleanDescription = description.trim();
 
   if (!user_id) return res.status(400).json({ error: "user_id is required." });
-  if (!["sale", "purchase", "expense"].includes(type)) {
-    return res.status(400).json({ error: "Type must be sale, purchase, or expense." });
+  if (!["sale", "purchase", "expense", "income"].includes(type)) {
+    return res.status(400).json({ error: "Type must be sale, purchase, expense, or income." });
   }
   if (!requireAmount(amount)) {
     return res.status(400).json({ error: "Amount must be greater than 0." });
@@ -612,9 +661,6 @@ app.post("/api/transaction/add", async (req, res) => {
 
   const bundle = await store.getBundle(user_id);
   if (!bundle) return res.status(404).json({ error: "User not found." });
-  if (bundle.user.user_type === "personal" && type !== "expense") {
-    return res.status(400).json({ error: "Personal users can add expenses only." });
-  }
 
   const transaction = {
     id: id("txn"),
@@ -672,9 +718,15 @@ app.get("/api/summary/last-3-days", async (req, res) => {
   res.json(last3DaySummary(bundle.transactions));
 });
 
-app.get("/api/users", async (_req, res) => {
-  const users = await store.listUsers();
-  res.json(users.map(sanitizeUser));
+app.get("/api/users/me", async (req, res) => {
+  const user = await store.findUserById(req.query.user_id);
+  if (!user) return res.status(404).json({ error: "User not found." });
+
+  res.json({ user: sanitizeUser(user) });
+});
+
+app.get("/api/users", (_req, res) => {
+  res.status(404).json({ error: "Not found." });
 });
 
 app.use((error, _req, res, _next) => {

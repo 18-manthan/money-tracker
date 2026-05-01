@@ -30,7 +30,21 @@ function Stat({ label, value, tone = "neutral" }) {
   );
 }
 
-function AuthScreen({ onReady }) {
+function ThemeToggle({ theme, onToggle, icons }) {
+  const Icon = theme === "dark" ? icons.Sun : icons.Moon;
+  return (
+    <button
+      className="icon-button"
+      onClick={onToggle}
+      type="button"
+      title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+    >
+      <Icon size={20} />
+    </button>
+  );
+}
+
+function AuthScreen({ onReady, theme, onThemeToggle, icons }) {
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({
     name: "",
@@ -71,7 +85,10 @@ function AuthScreen({ onReady }) {
   return (
     <main className="setup-shell">
       <section className="setup-panel">
-        <div className="brand">Daily Money Flow Tracker</div>
+        <div className="auth-header">
+          <div className="brand">Daily Money Flow Tracker</div>
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} icons={icons} />
+        </div>
         <h1>{mode === "signup" ? "Create your money tracker." : "Welcome back."}</h1>
         <div className="segmented auth-tabs" role="tablist" aria-label="Account mode">
           <button
@@ -184,7 +201,10 @@ function AuthScreen({ onReady }) {
 }
 
 function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
-  const allowedTypes = user.user_type === "business" ? ["sale", "purchase", "expense"] : ["expense"];
+  const allowedTypes =
+    user.user_type === "business"
+      ? ["sale", "purchase", "expense", "income"]
+      : ["expense", "income"];
   const [form, setForm] = useState({ amount: "", description: "", date: today });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -196,6 +216,12 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
   async function submit(event) {
     event.preventDefault();
     setError("");
+    if (activeType === "income") {
+      const confirmed = window.confirm(
+        `Add ${formatMoney(form.amount)} to your balance as "${form.description}"? This will increase balance but will not count as profit.`
+      );
+      if (!confirmed) return;
+    }
     setSaving(true);
     try {
       const result = await request("/transaction/add", {
@@ -220,7 +246,8 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
   const labels = {
     sale: "Sale",
     purchase: "Purchase",
-    expense: "Expense"
+    expense: "Expense",
+    income: "Add Money"
   };
 
   return (
@@ -232,7 +259,9 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
               ? icons.ArrowUpCircle
               : type === "purchase"
                 ? icons.ArrowDownCircle
-                : icons.MinusCircle;
+                : type === "income"
+                  ? icons.CircleDollarSign
+                  : icons.MinusCircle;
           return (
             <button
               key={type}
@@ -268,7 +297,15 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
           <input
             value={form.description}
             onChange={(event) => setForm({ ...form, description: event.target.value })}
-            placeholder={activeType === "expense" ? "Rent, tea, fuel" : `${labels[activeType]} details`}
+            placeholder={
+              activeType === "expense"
+                ? "Rent, tea, fuel"
+                : activeType === "income"
+                  ? user.user_type === "business"
+                    ? "Owner cash, capital"
+                    : "Salary, bonus"
+                  : `${labels[activeType]} details`
+            }
             required
           />
         </label>
@@ -340,7 +377,7 @@ function TransactionList({ transactions, pagination, onPageChange }) {
   );
 }
 
-function Dashboard({ user, icons, onReset }) {
+function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [dashboard, setDashboard] = useState(null);
   const [summary, setSummary] = useState(null);
   const [transactions, setTransactions] = useState([]);
@@ -407,9 +444,12 @@ function Dashboard({ user, icons, onReset }) {
           <span>{user.user_type === "business" ? "Business" : "Personal"}</span>
           <h1>{user.name}</h1>
         </div>
-        <button className="icon-button" onClick={onReset} type="button" title="Logout">
-          <icons.LogOut size={20} />
-        </button>
+        <div className="topbar-actions">
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} icons={icons} />
+          <button className="icon-button" onClick={onReset} type="button" title="Logout">
+            <icons.LogOut size={20} />
+          </button>
+        </div>
       </header>
 
       <section className="hero-balance">
@@ -420,7 +460,9 @@ function Dashboard({ user, icons, onReset }) {
             {dashboard.profit_loss >= 0 ? "Profit" : "Loss"} {formatMoney(Math.abs(dashboard.profit_loss))}
           </em>
         ) : (
-          <em>Total spent {formatMoney(dashboard.total_expenses)}</em>
+          <em>
+            Added {formatMoney(dashboard.total_income)} · Spent {formatMoney(dashboard.total_expenses)}
+          </em>
         )}
       </section>
 
@@ -443,6 +485,7 @@ function Dashboard({ user, icons, onReset }) {
             <Stat label="Purchases" value={dashboard.total_purchases} tone="warning" />
           </>
         ) : null}
+        <Stat label="Added Money" value={dashboard.total_income} tone="positive" />
         <Stat label="Expenses" value={dashboard.total_expenses} tone="negative" />
       </section>
 
@@ -484,6 +527,19 @@ function Dashboard({ user, icons, onReset }) {
 export default function App({ icons }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [theme, setTheme] = useState(() => {
+    const savedTheme = localStorage.getItem("dmft_theme");
+    if (savedTheme === "light" || savedTheme === "dark") return savedTheme;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "dark" ? "#101713" : "#173f35");
+    localStorage.setItem("dmft_theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     async function loadUser() {
@@ -493,8 +549,8 @@ export default function App({ icons }) {
         return;
       }
       try {
-        const users = await request("/users");
-        setUser(users.find((item) => item.id === savedId) || null);
+        const result = await request(`/users/me?user_id=${savedId}`);
+        setUser(result.user);
       } finally {
         setLoading(false);
       }
@@ -507,7 +563,28 @@ export default function App({ icons }) {
     setUser(null);
   }
 
+  function toggleTheme() {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }
+
   if (loading) return <main className="app-shell loading">Loading...</main>;
-  if (!user) return <AuthScreen onReady={setUser} />;
-  return <Dashboard user={user} icons={icons} onReset={reset} />;
+  if (!user) {
+    return (
+      <AuthScreen
+        onReady={setUser}
+        theme={theme}
+        onThemeToggle={toggleTheme}
+        icons={icons}
+      />
+    );
+  }
+  return (
+    <Dashboard
+      user={user}
+      icons={icons}
+      onReset={reset}
+      theme={theme}
+      onThemeToggle={toggleTheme}
+    />
+  );
 }
