@@ -530,6 +530,7 @@ async function createUser(req, res, { requirePassword }) {
   res.status(201).json({ user: sanitizeUser(user), balance });
 }
 
+
 app.post("/api/auth/signup", (req, res, next) =>
   createUser(req, res, { requirePassword: true }).catch(next)
 );
