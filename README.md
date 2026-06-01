@@ -32,6 +32,11 @@ For install testing:
 
 Note: mobile browsers usually require HTTPS for full PWA install/service-worker behavior. The local network HTTP URL is good for UI testing; use an HTTPS deployment or tunnel for true install testing.
 
+## Production env
+
+- `APP_TIMEZONE` — calendar date and monthly totals (default `Asia/Kolkata`)
+- `ALLOW_CREATE_USER=true` — only if you need the passwordless `POST /api/create-user` bootstrap endpoint (off by default)
+
 ## API
 
 - `POST /api/auth/signup`

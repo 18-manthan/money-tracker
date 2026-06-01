@@ -12,6 +12,13 @@ const LEGACY_JSON_FILE = join(DATA_DIR, "db.json");
 const PORT = process.env.PORT || 4000;
 const DATABASE_URL =
   process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL || "";
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Kolkata";
+const ALLOW_CREATE_USER = process.env.ALLOW_CREATE_USER === "true";
+
+const ALLOWED_TRANSACTION_TYPES = {
+  business: ["sale", "purchase", "expense", "income"],
+  personal: ["expense", "income"]
+};
 
 const app = express();
 app.use(cors());
@@ -21,12 +28,78 @@ function id(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+function getZonedParts(date = new Date(), timeZone = APP_TIMEZONE) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    })
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day)
+  };
+}
+
+function localTodayIso(date = new Date(), timeZone = APP_TIMEZONE) {
+  const { year, month, day } = getZonedParts(date, timeZone);
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function localMonthKey(date = new Date(), timeZone = APP_TIMEZONE) {
+  const { year, month } = getZonedParts(date, timeZone);
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function shiftMonthKey(monthKey, delta) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const shifted = new Date(year, month - 1 + delta, 1);
+  return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function transactionMonthKey(dateString) {
+  return String(dateString || "").slice(0, 7);
+}
+
+function isValidDateString(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const [year, month, day] = date.split("-").map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const parsed = new Date(year, month - 1, day);
+  return (
+    parsed.getFullYear() === year &&
+    parsed.getMonth() === month - 1 &&
+    parsed.getDate() === day
+  );
+}
+
+function isAllowedTransactionType(userType, type) {
+  return ALLOWED_TRANSACTION_TYPES[userType]?.includes(type) ?? false;
+}
+
+function filterTransactionsForUser(userType, transactions) {
+  const allowed = ALLOWED_TRANSACTION_TYPES[userType] || [];
+  return transactions.filter((txn) => allowed.includes(txn.type) && isValidDateString(txn.date));
 }
 
 function toMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function sumByType(transactions) {
+  return transactions.reduce(
+    (acc, txn) => {
+      acc[txn.type] = toMoney(acc[txn.type] + Number(txn.amount));
+      return acc;
+    },
+    { sale: 0, purchase: 0, expense: 0, income: 0 }
+  );
 }
 
 function requireAmount(amount) {
@@ -59,18 +132,13 @@ function verifyPassword(password, user) {
 
 function calculateDashboard(bundle) {
   const openingBalance = toMoney(bundle.balance?.opening_balance || 0);
-  const totals = bundle.transactions.reduce(
-    (acc, txn) => {
-      acc[txn.type] += Number(txn.amount);
-      return acc;
-    },
-    { sale: 0, purchase: 0, expense: 0, income: 0 }
-  );
+  const relevant = filterTransactionsForUser(bundle.user.user_type, bundle.transactions);
+  const totals = sumByType(relevant);
 
-  const totalSales = toMoney(totals.sale);
-  const totalPurchases = toMoney(totals.purchase);
-  const totalExpenses = toMoney(totals.expense);
-  const totalIncome = toMoney(totals.income);
+  const totalSales = totals.sale;
+  const totalPurchases = totals.purchase;
+  const totalExpenses = totals.expense;
+  const totalIncome = totals.income;
   const profitLoss = toMoney(totalSales - (totalPurchases + totalExpenses));
   const currentBalance =
     bundle.user.user_type === "business"
@@ -91,49 +159,61 @@ function calculateDashboard(bundle) {
   };
 }
 
-function startOfDay(date) {
-  const value = new Date(date);
-  value.setHours(0, 0, 0, 0);
-  return value;
-}
+function monthlySummary(transactions, userType = "business") {
+  const currentMonthKey = localMonthKey();
+  const previousMonthKey = shiftMonthKey(currentMonthKey, -1);
+  const relevant = filterTransactionsForUser(userType, transactions);
 
-function monthlySummary(transactions) {
-  const now = startOfDay(new Date());
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const current = sumByType(
+    relevant.filter((txn) => transactionMonthKey(txn.date) === currentMonthKey)
+  );
+  const previous = sumByType(
+    relevant.filter((txn) => transactionMonthKey(txn.date) === previousMonthKey)
+  );
 
-  const inWindow = (txn, start, end) => {
-    const txnDate = startOfDay(`${txn.date}T00:00:00`);
-    return txnDate >= start && txnDate < end;
-  };
-
-  const sum = (items) =>
-    items.reduce(
-      (acc, txn) => {
-        acc[txn.type] += Number(txn.amount);
-        return acc;
-      },
-      { sale: 0, purchase: 0, expense: 0, income: 0 }
-    );
-
-  const current = sum(transactions.filter((txn) => inWindow(txn, monthStart, nextMonthStart)));
-  const previous = sum(transactions.filter((txn) => inWindow(txn, previousMonthStart, monthStart)));
-
-  const currentProfit = current.sale - (current.purchase + current.expense);
-  const previousProfit = previous.sale - (previous.purchase + previous.expense);
+  const currentProfit = toMoney(current.sale - (current.purchase + current.expense));
+  const previousProfit = toMoney(previous.sale - (previous.purchase + previous.expense));
   const difference = toMoney(currentProfit - previousProfit);
+  const netCashFlow = toMoney(current.income - current.expense);
+  const isPersonal = userType === "personal";
 
   return {
-    from: monthStart.toISOString().slice(0, 10),
-    to: now.toISOString().slice(0, 10),
-    total_sales: toMoney(current.sale),
-    total_purchases: toMoney(current.purchase),
-    total_expenses: toMoney(current.expense),
-    total_income: toMoney(current.income),
-    net_profit_loss: toMoney(currentProfit),
+    from: `${currentMonthKey}-01`,
+    to: localTodayIso(),
+    timezone: APP_TIMEZONE,
+    total_sales: current.sale,
+    total_purchases: current.purchase,
+    total_expenses: current.expense,
+    total_income: current.income,
+    net_profit_loss: isPersonal ? netCashFlow : currentProfit,
+    net_cash_flow: netCashFlow,
     trend: difference > 0 ? "increase" : difference < 0 ? "decrease" : "no change",
     trend_difference: difference
+  };
+}
+
+function lastThreeDaysSummary(transactions, userType = "business") {
+  const relevant = filterTransactionsForUser(userType, transactions);
+  const allowedDates = new Set([
+    localTodayIso(),
+    localTodayIso(new Date(Date.now() - 86_400_000)),
+    localTodayIso(new Date(Date.now() - 2 * 86_400_000))
+  ]);
+  const recent = relevant.filter((txn) => allowedDates.has(txn.date));
+  const totals = sumByType(recent);
+  const netCashFlow = toMoney(totals.income - totals.expense);
+  const netProfit = toMoney(totals.sale - (totals.purchase + totals.expense));
+
+  return {
+    from: [...allowedDates].sort()[0],
+    to: localTodayIso(),
+    timezone: APP_TIMEZONE,
+    total_sales: totals.sale,
+    total_purchases: totals.purchase,
+    total_expenses: totals.expense,
+    total_income: totals.income,
+    net_profit_loss: userType === "personal" ? netCashFlow : netProfit,
+    net_cash_flow: netCashFlow
   };
 }
 
@@ -641,9 +721,12 @@ app.post("/api/auth/signup", (req, res, next) =>
   createUser(req, res, { requirePassword: true }).catch(next)
 );
 
-app.post("/api/create-user", (req, res, next) =>
-  createUser(req, res, { requirePassword: false }).catch(next)
-);
+app.post("/api/create-user", (req, res, next) => {
+  if (!ALLOW_CREATE_USER) {
+    return res.status(404).json({ error: "Not found." });
+  }
+  createUser(req, res, { requirePassword: false }).catch(next);
+});
 
 app.post("/api/auth/login", async (req, res) => {
   const { email = "", password = "" } = req.body;
@@ -657,8 +740,9 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/transaction/add", async (req, res) => {
-  const { user_id, type, amount, description = "", date = todayIso() } = req.body;
+  const { user_id, type, amount, description = "", date = localTodayIso() } = req.body;
   const cleanDescription = description.trim();
+  const entryDate = String(date).trim();
 
   if (!user_id) return res.status(400).json({ error: "user_id is required." });
   if (!["sale", "purchase", "expense", "income"].includes(type)) {
@@ -670,12 +754,20 @@ app.post("/api/transaction/add", async (req, res) => {
   if (!cleanDescription) {
     return res.status(400).json({ error: "Description is required." });
   }
-  if (Number.isNaN(Date.parse(`${date}T00:00:00`))) {
-    return res.status(400).json({ error: "Date must be valid." });
+  if (!isValidDateString(entryDate)) {
+    return res.status(400).json({ error: "Date must be YYYY-MM-DD." });
   }
 
   const bundle = await store.getBundle(user_id);
   if (!bundle) return res.status(404).json({ error: "User not found." });
+  if (!isAllowedTransactionType(bundle.user.user_type, type)) {
+    return res.status(400).json({
+      error:
+        bundle.user.user_type === "personal"
+          ? "Personal accounts can only add expense or income entries."
+          : "This transaction type is not allowed for this account."
+    });
+  }
 
   const transaction = {
     id: id("txn"),
@@ -683,7 +775,7 @@ app.post("/api/transaction/add", async (req, res) => {
     type,
     amount: toMoney(amount),
     description: cleanDescription,
-    date,
+    date: entryDate,
     created_at: new Date().toISOString()
   };
 
@@ -693,7 +785,7 @@ app.post("/api/transaction/add", async (req, res) => {
   res.status(201).json({
     transaction,
     dashboard: calculateDashboard(updatedBundle),
-    summary: monthlySummary(updatedBundle.transactions)
+    summary: monthlySummary(updatedBundle.transactions, updatedBundle.user.user_type)
   });
 });
 
@@ -710,11 +802,15 @@ app.post("/api/transaction/delete", async (req, res) => {
   res.json({
     deleted,
     dashboard: calculateDashboard(updatedBundle),
-    summary: monthlySummary(updatedBundle.transactions)
+    summary: monthlySummary(updatedBundle.transactions, updatedBundle.user.user_type)
   });
 });
 
 app.get("/api/transactions/list", async (req, res) => {
+  if (!req.query.user_id) {
+    return res.status(400).json({ error: "user_id is required." });
+  }
+
   const transactions = await store.listTransactions({
     userId: req.query.user_id,
     page: Number(req.query.page || 0),
@@ -747,14 +843,14 @@ app.get("/api/summary/month", async (req, res) => {
   const bundle = await store.getBundle(req.query.user_id);
   if (!bundle) return res.status(404).json({ error: "User not found." });
 
-  res.json(monthlySummary(bundle.transactions));
+  res.json(monthlySummary(bundle.transactions, bundle.user.user_type));
 });
 
 app.get("/api/summary/last-3-days", async (req, res) => {
   const bundle = await store.getBundle(req.query.user_id);
   if (!bundle) return res.status(404).json({ error: "User not found." });
 
-  res.json(monthlySummary(bundle.transactions));
+  res.json(lastThreeDaysSummary(bundle.transactions, bundle.user.user_type));
 });
 
 app.get("/api/users/me", async (req, res) => {

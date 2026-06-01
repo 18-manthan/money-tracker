@@ -1,7 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 
 const API = "/api";
-const today = new Date().toISOString().slice(0, 10);
+
+function localTodayIso() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+const TYPE_LABELS = {
+  sale: "Sale",
+  purchase: "Purchase",
+  expense: "Expense",
+  income: "Add Money"
+};
 
 function formatMoney(value) {
   return new Intl.NumberFormat("en-IN", {
@@ -19,6 +33,28 @@ async function request(path, options) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Something went wrong.");
   return data;
+}
+
+function formatEntryDate(dateString) {
+  if (!dateString) return "";
+  const [year, month, day] = dateString.split("-").map(Number);
+  if (!year || !month || !day) return dateString;
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric"
+  }).format(new Date(year, month - 1, day));
+}
+
+function formatEntryTime(isoString) {
+  if (!isoString) return "";
+  const value = new Date(isoString);
+  if (Number.isNaN(value.getTime())) return "";
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  }).format(value);
 }
 
 function Stat({ label, value, tone = "neutral" }) {
@@ -205,7 +241,7 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
     user.user_type === "business"
       ? ["sale", "purchase", "expense", "income"]
       : ["expense", "income"];
-  const [form, setForm] = useState({ amount: "", description: "", date: today });
+  const [form, setForm] = useState({ amount: "", description: "", date: localTodayIso() });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -234,7 +270,7 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
           date: form.date
         })
       });
-      setForm({ amount: "", description: "", date: today });
+      setForm({ amount: "", description: "", date: localTodayIso() });
       onAdded(result);
     } catch (err) {
       setError(err.message);
@@ -328,7 +364,16 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
   );
 }
 
-function TransactionList({ transactions, pagination, onPageChange, onDelete, deletingId, icons }) {
+function TransactionList({
+  transactions,
+  total,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  onDelete,
+  deletingId,
+  icons
+}) {
   if (!transactions.length) {
     return <p className="empty">No entries yet. Add the first one above.</p>;
   }
@@ -337,14 +382,20 @@ function TransactionList({ transactions, pagination, onPageChange, onDelete, del
     <section className="transactions" aria-label="Recent transactions">
       <div className="section-heading">
         <h2>Recent Entries</h2>
-        <span>{pagination.total} total</span>
+        <span>
+          Showing {transactions.length} of {total}
+        </span>
       </div>
       <div className="txn-list">
         {transactions.map((txn) => (
           <article className={`txn ${txn.type}`} key={txn.id}>
             <div>
-              <strong>{txn.type}</strong>
-              <span>{txn.description || txn.date}</span>
+              <strong>{TYPE_LABELS[txn.type] || txn.type}</strong>
+              <span>{txn.description}</span>
+              <time className="txn-meta" dateTime={txn.created_at || txn.date}>
+                {formatEntryDate(txn.date)}
+                {txn.created_at ? ` · ${formatEntryTime(txn.created_at)}` : ""}
+              </time>
             </div>
             <div className="txn-actions">
               <b>{formatMoney(txn.amount)}</b>
@@ -361,26 +412,15 @@ function TransactionList({ transactions, pagination, onPageChange, onDelete, del
           </article>
         ))}
       </div>
-      {pagination.total_pages > 1 ? (
-        <div className="pagination" aria-label="Recent entries pagination">
+      {hasMore ? (
+        <div className="load-more">
           <button
             className="secondary"
             type="button"
-            disabled={pagination.page <= 1}
-            onClick={() => onPageChange(pagination.page - 1)}
+            disabled={loadingMore}
+            onClick={onLoadMore}
           >
-            Previous
-          </button>
-          <span>
-            Page {pagination.page} of {pagination.total_pages}
-          </span>
-          <button
-            className="secondary"
-            type="button"
-            disabled={pagination.page >= pagination.total_pages}
-            onClick={() => onPageChange(pagination.page + 1)}
-          >
-            Next
+            {loadingMore ? "Loading..." : "Load more"}
           </button>
         </div>
       ) : null}
@@ -392,35 +432,103 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [dashboard, setDashboard] = useState(null);
   const [summary, setSummary] = useState(null);
   const [transactions, setTransactions] = useState([]);
-  const [transactionPage, setTransactionPage] = useState(1);
-  const [pagination, setPagination] = useState({ page: 1, total_pages: 1, total: 0 });
+  const [listPage, setListPage] = useState(1);
+  const [listMeta, setListMeta] = useState({ total: 0, total_pages: 1 });
+  const [loadingMore, setLoadingMore] = useState(false);
   const [activeType, setActiveType] = useState(user.user_type === "business" ? "sale" : "expense");
   const [deletingId, setDeletingId] = useState("");
   const [error, setError] = useState("");
   const transactionLimit = 5;
 
   const dashboardPath = user.user_type === "business" ? "/dashboard/business" : "/dashboard/personal";
+  const hasMore = listPage < listMeta.total_pages;
 
-  async function refresh(page = transactionPage) {
-    const [dashboardData, summaryData, transactionData] = await Promise.all([
+  function fetchTransactionPage(page) {
+    return request(
+      `/transactions/list?user_id=${user.id}&page=${page}&limit=${transactionLimit}`
+    );
+  }
+
+  function applyTransactionPage(data, page) {
+    setTransactions(data.items);
+    setListPage(page);
+    setListMeta({ total: data.total, total_pages: data.total_pages });
+  }
+
+  async function loadInitialTransactions() {
+    const data = await fetchTransactionPage(1);
+    applyTransactionPage(data, 1);
+  }
+
+  async function reloadLoadedTransactions(pageCount = listPage) {
+    const pages = Math.max(1, pageCount);
+    const results = await Promise.all(
+      Array.from({ length: pages }, (_, index) => fetchTransactionPage(index + 1))
+    );
+    const seen = new Set();
+    const merged = [];
+    for (const data of results) {
+      for (const txn of data.items) {
+        if (seen.has(txn.id)) continue;
+        seen.add(txn.id);
+        merged.push(txn);
+      }
+    }
+    const last = results[results.length - 1];
+    setTransactions(merged);
+    setListMeta({ total: last.total, total_pages: last.total_pages });
+
+    if (pages > last.total_pages) {
+      setListPage(last.total_pages);
+      if (last.total_pages > 0 && last.total_pages !== pages) {
+        await reloadLoadedTransactions(last.total_pages);
+      }
+      return;
+    }
+
+    setListPage(pages);
+  }
+
+  async function refresh() {
+    const [dashboardData, summaryData] = await Promise.all([
       request(`${dashboardPath}?user_id=${user.id}`),
-      request(`/summary/month?user_id=${user.id}`),
-      request(`/transactions/list?user_id=${user.id}&page=${page}&limit=${transactionLimit}`)
+      request(`/summary/month?user_id=${user.id}`)
     ]);
     setDashboard(dashboardData);
     setSummary(summaryData);
-    setTransactions(transactionData.items);
-    setPagination({
-      page: transactionData.page,
-      total_pages: transactionData.total_pages,
-      total: transactionData.total
-    });
-    setTransactionPage(transactionData.page);
+    await loadInitialTransactions();
   }
 
   useEffect(() => {
-    refresh(transactionPage).catch((err) => setError(err.message));
-  }, [user.id, transactionPage]);
+    refresh().catch((err) => setError(err.message));
+  }, [user.id]);
+
+  async function loadMore() {
+    if (loadingMore || listPage >= listMeta.total_pages) return;
+
+    setLoadingMore(true);
+    setError("");
+    try {
+      const nextPage = listPage + 1;
+      const data = await fetchTransactionPage(nextPage);
+      setTransactions((current) => {
+        const seen = new Set(current.map((txn) => txn.id));
+        const merged = [...current];
+        for (const txn of data.items) {
+          if (seen.has(txn.id)) continue;
+          seen.add(txn.id);
+          merged.push(txn);
+        }
+        return merged;
+      });
+      setListPage(nextPage);
+      setListMeta({ total: data.total, total_pages: data.total_pages });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   const profitTone = useMemo(() => {
     if (!dashboard) return "neutral";
@@ -430,8 +538,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   function handleAdded(result) {
     setDashboard(result.dashboard);
     setSummary(result.summary);
-    setTransactionPage(1);
-    refresh(1).catch((err) => setError(err.message));
+    loadInitialTransactions().catch((err) => setError(err.message));
   }
 
   async function handleDelete(txn) {
@@ -452,9 +559,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
       });
       setDashboard(result.dashboard);
       setSummary(result.summary);
-      const nextPage =
-        transactions.length === 1 && transactionPage > 1 ? transactionPage - 1 : transactionPage;
-      await refresh(nextPage);
+      await reloadLoadedTransactions();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -535,7 +640,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
           <strong>
             {user.user_type === "business"
               ? formatMoney(summary.net_profit_loss)
-              : formatMoney(summary.total_income - summary.total_expenses)}
+              : formatMoney(summary.net_cash_flow ?? summary.net_profit_loss)}
           </strong>
         </div>
         {user.user_type === "business" ? (
@@ -570,8 +675,10 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
 
       <TransactionList
         transactions={transactions}
-        pagination={pagination}
-        onPageChange={setTransactionPage}
+        total={listMeta.total}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
+        onLoadMore={loadMore}
         onDelete={handleDelete}
         deletingId={deletingId}
         icons={icons}
@@ -607,6 +714,8 @@ export default function App({ icons }) {
       try {
         const result = await request(`/users/me?user_id=${savedId}`);
         setUser(result.user);
+      } catch {
+        localStorage.removeItem("dmft_user_id");
       } finally {
         setLoading(false);
       }
