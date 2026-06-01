@@ -63,10 +63,6 @@ function shiftMonthKey(monthKey, delta) {
   return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function transactionMonthKey(dateString) {
-  return String(dateString || "").slice(0, 7);
-}
-
 function isValidDateString(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
   const [year, month, day] = date.split("-").map(Number);
@@ -83,23 +79,8 @@ function isAllowedTransactionType(userType, type) {
   return ALLOWED_TRANSACTION_TYPES[userType]?.includes(type) ?? false;
 }
 
-function filterTransactionsForUser(userType, transactions) {
-  const allowed = ALLOWED_TRANSACTION_TYPES[userType] || [];
-  return transactions.filter((txn) => allowed.includes(txn.type) && isValidDateString(txn.date));
-}
-
 function toMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
-}
-
-function sumByType(transactions) {
-  return transactions.reduce(
-    (acc, txn) => {
-      acc[txn.type] = toMoney(acc[txn.type] + Number(txn.amount));
-      return acc;
-    },
-    { sale: 0, purchase: 0, expense: 0, income: 0 }
-  );
 }
 
 function requireAmount(amount) {
@@ -130,23 +111,43 @@ function verifyPassword(password, user) {
   return stored.length === candidate.length && timingSafeEqual(stored, candidate);
 }
 
-function calculateDashboard(bundle) {
-  const openingBalance = toMoney(bundle.balance?.opening_balance || 0);
-  const relevant = filterTransactionsForUser(bundle.user.user_type, bundle.transactions);
-  const totals = sumByType(relevant);
+function rowsToTotals(rows) {
+  const totals = { sale: 0, purchase: 0, expense: 0, income: 0 };
+  for (const row of rows) {
+    if (row.type in totals) totals[row.type] = toMoney(row.total);
+  }
+  return totals;
+}
 
+function splitAggregatedRows(rows) {
+  const allTime = { sale: 0, purchase: 0, expense: 0, income: 0 };
+  const current = { sale: 0, purchase: 0, expense: 0, income: 0 };
+  const previous = { sale: 0, purchase: 0, expense: 0, income: 0 };
+
+  for (const row of rows) {
+    if (!(row.type in allTime)) continue;
+    allTime[row.type] = toMoney(row.all_time);
+    current[row.type] = toMoney(row.current_month);
+    previous[row.type] = toMoney(row.previous_month);
+  }
+
+  return { allTime, current, previous };
+}
+
+function calculateDashboardFromAccount(user, balance, totals) {
+  const openingBalance = toMoney(balance?.opening_balance || 0);
   const totalSales = totals.sale;
   const totalPurchases = totals.purchase;
   const totalExpenses = totals.expense;
   const totalIncome = totals.income;
   const profitLoss = toMoney(totalSales - (totalPurchases + totalExpenses));
   const currentBalance =
-    bundle.user.user_type === "business"
+    user.user_type === "business"
       ? toMoney(openingBalance + totalIncome + totalSales - totalPurchases - totalExpenses)
       : toMoney(openingBalance + totalIncome - totalExpenses);
 
   return {
-    user: sanitizeUser(bundle.user),
+    user: sanitizeUser(user),
     opening_balance: openingBalance,
     starting_balance: openingBalance,
     current_balance: currentBalance,
@@ -159,18 +160,8 @@ function calculateDashboard(bundle) {
   };
 }
 
-function monthlySummary(transactions, userType = "business") {
+function monthlySummaryFromTotals(current, previous, userType = "business") {
   const currentMonthKey = localMonthKey();
-  const previousMonthKey = shiftMonthKey(currentMonthKey, -1);
-  const relevant = filterTransactionsForUser(userType, transactions);
-
-  const current = sumByType(
-    relevant.filter((txn) => transactionMonthKey(txn.date) === currentMonthKey)
-  );
-  const previous = sumByType(
-    relevant.filter((txn) => transactionMonthKey(txn.date) === previousMonthKey)
-  );
-
   const currentProfit = toMoney(current.sale - (current.purchase + current.expense));
   const previousProfit = toMoney(previous.sale - (previous.purchase + previous.expense));
   const difference = toMoney(currentProfit - previousProfit);
@@ -192,20 +183,17 @@ function monthlySummary(transactions, userType = "business") {
   };
 }
 
-function lastThreeDaysSummary(transactions, userType = "business") {
-  const relevant = filterTransactionsForUser(userType, transactions);
-  const allowedDates = new Set([
-    localTodayIso(),
+function lastThreeDaysSummaryFromTotals(totals, userType = "business") {
+  const allowedDates = [
+    localTodayIso(new Date(Date.now() - 2 * 86_400_000)),
     localTodayIso(new Date(Date.now() - 86_400_000)),
-    localTodayIso(new Date(Date.now() - 2 * 86_400_000))
-  ]);
-  const recent = relevant.filter((txn) => allowedDates.has(txn.date));
-  const totals = sumByType(recent);
+    localTodayIso()
+  ];
   const netCashFlow = toMoney(totals.income - totals.expense);
   const netProfit = toMoney(totals.sale - (totals.purchase + totals.expense));
 
   return {
-    from: [...allowedDates].sort()[0],
+    from: allowedDates[0],
     to: localTodayIso(),
     timezone: APP_TIMEZONE,
     total_sales: totals.sale,
@@ -214,6 +202,33 @@ function lastThreeDaysSummary(transactions, userType = "business") {
     total_income: totals.income,
     net_profit_loss: userType === "personal" ? netCashFlow : netProfit,
     net_cash_flow: netCashFlow
+  };
+}
+
+async function buildAccountMetrics(store, userId) {
+  const user = await store.findUserById(userId);
+  if (!user) return null;
+
+  const balance = await store.getBalance(userId);
+  const currentMonthKey = localMonthKey();
+  const previousMonthKey = shiftMonthKey(currentMonthKey, -1);
+  const aggregated = await store.getAggregatedTotals(userId, user.user_type, {
+    currentMonthKey,
+    previousMonthKey
+  });
+  const { allTime, current, previous } = splitAggregatedRows(aggregated);
+
+  return {
+    user,
+    balance,
+    dashboard: calculateDashboardFromAccount(user, balance, allTime),
+    summary: monthlySummaryFromTotals(current, previous, user.user_type)
+  };
+}
+
+function asyncRoute(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
   };
 }
 
@@ -374,16 +389,42 @@ async function createSqliteStore() {
         .prepare("INSERT INTO balances (id, user_id, opening_balance) VALUES (?, ?, ?)")
         .run(balance.id, balance.user_id, balance.opening_balance);
     },
-    async getBundle(userId) {
-      const user = sqlite.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-      if (!user) return null;
-      return {
-        user,
-        balance: sqlite.prepare("SELECT * FROM balances WHERE user_id = ?").get(userId),
-        transactions: sqlite
-          .prepare("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC, created_at DESC")
-          .all(userId)
-      };
+    async getBalance(userId) {
+      return sqlite.prepare("SELECT * FROM balances WHERE user_id = ?").get(userId);
+    },
+    async getAggregatedTotals(userId, userType, { currentMonthKey, previousMonthKey }) {
+      const types = ALLOWED_TRANSACTION_TYPES[userType];
+      const placeholders = types.map(() => "?").join(", ");
+      return sqlite
+        .prepare(
+          `SELECT type,
+                  SUM(amount) AS all_time,
+                  SUM(CASE WHEN substr(date, 1, 7) = ? THEN amount ELSE 0 END) AS current_month,
+                  SUM(CASE WHEN substr(date, 1, 7) = ? THEN amount ELSE 0 END) AS previous_month
+           FROM transactions
+           WHERE user_id = ?
+             AND type IN (${placeholders})
+             AND date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+           GROUP BY type`
+        )
+        .all(currentMonthKey, previousMonthKey, userId, ...types);
+    },
+    async getRecentTotals(userId, userType, dates) {
+      const types = ALLOWED_TRANSACTION_TYPES[userType];
+      const typePlaceholders = types.map(() => "?").join(", ");
+      const datePlaceholders = dates.map(() => "?").join(", ");
+      const rows = sqlite
+        .prepare(
+          `SELECT type, SUM(amount) AS total
+           FROM transactions
+           WHERE user_id = ?
+             AND type IN (${typePlaceholders})
+             AND date IN (${datePlaceholders})
+             AND date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+           GROUP BY type`
+        )
+        .all(userId, ...types, ...dates);
+      return rowsToTotals(rows);
     },
     async addTransaction(transaction) {
       sqlite
@@ -444,7 +485,10 @@ async function createPostgresStore() {
   const isLocal = /localhost|127\.0\.0\.1/.test(DATABASE_URL);
   const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: isLocal ? false : { rejectUnauthorized: false }
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+    max: process.env.VERCEL ? 1 : 10,
+    idleTimeoutMillis: 20_000,
+    connectionTimeoutMillis: 10_000
   });
 
   await pool.query(`
@@ -545,22 +589,37 @@ async function createPostgresStore() {
         client.release();
       }
     },
-    async getBundle(userId) {
-      const [userResult, balanceResult, transactionResult] = await Promise.all([
-        pool.query("SELECT * FROM users WHERE id = $1", [userId]),
-        pool.query("SELECT * FROM balances WHERE user_id = $1", [userId]),
-        pool.query(
-          "SELECT * FROM transactions WHERE user_id = $1 ORDER BY date DESC, created_at DESC",
-          [userId]
-        )
-      ]);
-      const user = userResult.rows[0];
-      if (!user) return null;
-      return {
-        user,
-        balance: balanceResult.rows[0],
-        transactions: transactionResult.rows
-      };
+    async getBalance(userId) {
+      const result = await pool.query("SELECT * FROM balances WHERE user_id = $1", [userId]);
+      return result.rows[0];
+    },
+    async getAggregatedTotals(userId, userType, { currentMonthKey, previousMonthKey }) {
+      const types = ALLOWED_TRANSACTION_TYPES[userType];
+      const result = await pool.query(
+        `SELECT type,
+                COALESCE(SUM(amount), 0) AS all_time,
+                COALESCE(SUM(CASE WHEN left(date, 7) = $3 THEN amount ELSE 0 END), 0) AS current_month,
+                COALESCE(SUM(CASE WHEN left(date, 7) = $4 THEN amount ELSE 0 END), 0) AS previous_month
+         FROM transactions
+         WHERE user_id = $1
+           AND type = ANY($2::text[])
+         GROUP BY type`,
+        [userId, types, currentMonthKey, previousMonthKey]
+      );
+      return result.rows;
+    },
+    async getRecentTotals(userId, userType, dates) {
+      const types = ALLOWED_TRANSACTION_TYPES[userType];
+      const result = await pool.query(
+        `SELECT type, COALESCE(SUM(amount), 0) AS total
+         FROM transactions
+         WHERE user_id = $1
+           AND type = ANY($2::text[])
+           AND date = ANY($3::text[])
+         GROUP BY type`,
+        [userId, types, dates]
+      );
+      return rowsToTotals(result.rows);
     },
     async addTransaction(transaction) {
       await pool.query(
@@ -640,7 +699,13 @@ function createMissingDatabaseStore() {
     async createUser() {
       throw error;
     },
-    async getBundle() {
+    async getBalance() {
+      throw error;
+    },
+    async getAggregatedTotals() {
+      throw error;
+    },
+    async getRecentTotals() {
       throw error;
     },
     async addTransaction() {
@@ -758,12 +823,12 @@ app.post("/api/transaction/add", async (req, res) => {
     return res.status(400).json({ error: "Date must be YYYY-MM-DD." });
   }
 
-  const bundle = await store.getBundle(user_id);
-  if (!bundle) return res.status(404).json({ error: "User not found." });
-  if (!isAllowedTransactionType(bundle.user.user_type, type)) {
+  const user = await store.findUserById(user_id);
+  if (!user) return res.status(404).json({ error: "User not found." });
+  if (!isAllowedTransactionType(user.user_type, type)) {
     return res.status(400).json({
       error:
-        bundle.user.user_type === "personal"
+        user.user_type === "personal"
           ? "Personal accounts can only add expense or income entries."
           : "This transaction type is not allowed for this account."
     });
@@ -781,11 +846,11 @@ app.post("/api/transaction/add", async (req, res) => {
 
   await store.addTransaction(transaction);
 
-  const updatedBundle = await store.getBundle(user_id);
+  const metrics = await buildAccountMetrics(store, user_id);
   res.status(201).json({
     transaction,
-    dashboard: calculateDashboard(updatedBundle),
-    summary: monthlySummary(updatedBundle.transactions, updatedBundle.user.user_type)
+    dashboard: metrics.dashboard,
+    summary: metrics.summary
   });
 });
 
@@ -798,11 +863,13 @@ app.post("/api/transaction/delete", async (req, res) => {
   const deleted = await store.deleteTransaction({ userId: user_id, transactionId: transaction_id });
   if (!deleted) return res.status(404).json({ error: "Transaction not found." });
 
-  const updatedBundle = await store.getBundle(user_id);
+  const metrics = await buildAccountMetrics(store, user_id);
+  if (!metrics) return res.status(404).json({ error: "User not found." });
+
   res.json({
     deleted,
-    dashboard: calculateDashboard(updatedBundle),
-    summary: monthlySummary(updatedBundle.transactions, updatedBundle.user.user_type)
+    dashboard: metrics.dashboard,
+    summary: metrics.summary
   });
 });
 
@@ -819,38 +886,70 @@ app.get("/api/transactions/list", async (req, res) => {
   res.json(transactions);
 });
 
-app.get("/api/dashboard/business", async (req, res) => {
-  const bundle = await store.getBundle(req.query.user_id);
-  if (!bundle) return res.status(404).json({ error: "User not found." });
-  if (bundle.user.user_type !== "business") {
-    return res.status(400).json({ error: "User is not a business user." });
-  }
+app.get(
+  "/api/account/overview",
+  asyncRoute(async (req, res) => {
+    if (!req.query.user_id) {
+      return res.status(400).json({ error: "user_id is required." });
+    }
 
-  res.json(calculateDashboard(bundle));
-});
+    const metrics = await buildAccountMetrics(store, req.query.user_id);
+    if (!metrics) return res.status(404).json({ error: "User not found." });
 
-app.get("/api/dashboard/personal", async (req, res) => {
-  const bundle = await store.getBundle(req.query.user_id);
-  if (!bundle) return res.status(404).json({ error: "User not found." });
-  if (bundle.user.user_type !== "personal") {
-    return res.status(400).json({ error: "User is not a personal user." });
-  }
+    res.json({
+      dashboard: metrics.dashboard,
+      summary: metrics.summary
+    });
+  })
+);
 
-  res.json(calculateDashboard(bundle));
-});
+app.get(
+  "/api/dashboard/business",
+  asyncRoute(async (req, res) => {
+    const metrics = await buildAccountMetrics(store, req.query.user_id);
+    if (!metrics) return res.status(404).json({ error: "User not found." });
+    if (metrics.user.user_type !== "business") {
+      return res.status(400).json({ error: "User is not a business user." });
+    }
 
-app.get("/api/summary/month", async (req, res) => {
-  const bundle = await store.getBundle(req.query.user_id);
-  if (!bundle) return res.status(404).json({ error: "User not found." });
+    res.json(metrics.dashboard);
+  })
+);
 
-  res.json(monthlySummary(bundle.transactions, bundle.user.user_type));
-});
+app.get(
+  "/api/dashboard/personal",
+  asyncRoute(async (req, res) => {
+    const metrics = await buildAccountMetrics(store, req.query.user_id);
+    if (!metrics) return res.status(404).json({ error: "User not found." });
+    if (metrics.user.user_type !== "personal") {
+      return res.status(400).json({ error: "User is not a personal user." });
+    }
+
+    res.json(metrics.dashboard);
+  })
+);
+
+app.get(
+  "/api/summary/month",
+  asyncRoute(async (req, res) => {
+    const metrics = await buildAccountMetrics(store, req.query.user_id);
+    if (!metrics) return res.status(404).json({ error: "User not found." });
+
+    res.json(metrics.summary);
+  })
+);
 
 app.get("/api/summary/last-3-days", async (req, res) => {
-  const bundle = await store.getBundle(req.query.user_id);
-  if (!bundle) return res.status(404).json({ error: "User not found." });
+  const user = await store.findUserById(req.query.user_id);
+  if (!user) return res.status(404).json({ error: "User not found." });
 
-  res.json(lastThreeDaysSummary(bundle.transactions, bundle.user.user_type));
+  const dates = [
+    localTodayIso(),
+    localTodayIso(new Date(Date.now() - 86_400_000)),
+    localTodayIso(new Date(Date.now() - 2 * 86_400_000))
+  ];
+  const totals = await store.getRecentTotals(user.id, user.user_type, dates);
+  res.json(lastThreeDaysSummaryFromTotals(totals, user.user_type));
 });
 
 app.get("/api/users/me", async (req, res) => {
@@ -866,7 +965,11 @@ app.get("/api/users", (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(error.statusCode || 500).json({ error: error.message || "Server error." });
+  if (res.headersSent) return;
+  res.status(error.statusCode || 500).json({
+    error: error.message || "Server error.",
+    code: error.code || undefined
+  });
 });
 
 export default app;

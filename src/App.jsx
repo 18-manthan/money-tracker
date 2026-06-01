@@ -30,8 +30,24 @@ async function request(path, options) {
     headers: { "Content-Type": "application/json" },
     ...options
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!response.ok) {
+        throw new Error(text.slice(0, 160) || `Request failed (${response.status}).`);
+      }
+      throw new Error("Server returned an invalid response. Please try again.");
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || text.slice(0, 160) || `Request failed (${response.status}).`);
+  }
+
   return data;
 }
 
@@ -440,7 +456,6 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [error, setError] = useState("");
   const transactionLimit = 5;
 
-  const dashboardPath = user.user_type === "business" ? "/dashboard/business" : "/dashboard/personal";
   const hasMore = listPage < listMeta.total_pages;
 
   function fetchTransactionPage(page) {
@@ -450,9 +465,12 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   }
 
   function applyTransactionPage(data, page) {
-    setTransactions(data.items);
+    setTransactions(Array.isArray(data?.items) ? data.items : []);
     setListPage(page);
-    setListMeta({ total: data.total, total_pages: data.total_pages });
+    setListMeta({
+      total: Number(data?.total || 0),
+      total_pages: Number(data?.total_pages || 1)
+    });
   }
 
   async function loadInitialTransactions() {
@@ -489,18 +507,52 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     setListPage(pages);
   }
 
+  async function loadOverview() {
+    const overview = await request(`/account/overview?user_id=${user.id}`);
+    setDashboard(overview.dashboard);
+    setSummary(overview.summary);
+  }
+
   async function refresh() {
-    const [dashboardData, summaryData] = await Promise.all([
-      request(`${dashboardPath}?user_id=${user.id}`),
-      request(`/summary/month?user_id=${user.id}`)
-    ]);
-    setDashboard(dashboardData);
-    setSummary(summaryData);
-    await loadInitialTransactions();
+    setError("");
+    try {
+      await loadOverview();
+    } catch (err) {
+      setError(err.message || "Could not load dashboard.");
+      return;
+    }
+
+    try {
+      await loadInitialTransactions();
+    } catch (err) {
+      setError(err.message || "Could not load recent entries.");
+    }
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(err.message));
+    let cancelled = false;
+
+    async function load() {
+      setDashboard(null);
+      setSummary(null);
+      setError("");
+      try {
+        const overview = await request(`/account/overview?user_id=${user.id}`);
+        if (cancelled) return;
+        setDashboard(overview.dashboard);
+        setSummary(overview.summary);
+        await loadInitialTransactions();
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || "Could not load dashboard.");
+        }
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, [user.id]);
 
   async function loadMore() {
@@ -714,8 +766,10 @@ export default function App({ icons }) {
       try {
         const result = await request(`/users/me?user_id=${savedId}`);
         setUser(result.user);
-      } catch {
-        localStorage.removeItem("dmft_user_id");
+      } catch (err) {
+        if (String(err.message || "").toLowerCase().includes("not found")) {
+          localStorage.removeItem("dmft_user_id");
+        }
       } finally {
         setLoading(false);
       }
