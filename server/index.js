@@ -79,6 +79,93 @@ function isAllowedTransactionType(userType, type) {
   return ALLOWED_TRANSACTION_TYPES[userType]?.includes(type) ?? false;
 }
 
+function parseTransactionListFilters(query, userType) {
+  const type = String(query.type || "").trim();
+  const from = String(query.from || "").trim();
+  const to = String(query.to || "").trim();
+  const filters = { type: "", from: "", to: "" };
+
+  if (type) {
+    if (!["sale", "purchase", "expense", "income"].includes(type)) {
+      return { error: "Invalid transaction type." };
+    }
+    if (userType && !isAllowedTransactionType(userType, type)) {
+      return { error: "This transaction type is not available for your account." };
+    }
+    filters.type = type;
+  }
+  if (from) {
+    if (!isValidDateString(from)) return { error: "From date must be YYYY-MM-DD." };
+    filters.from = from;
+  }
+  if (to) {
+    if (!isValidDateString(to)) return { error: "To date must be YYYY-MM-DD." };
+    filters.to = to;
+  }
+  if (filters.from && filters.to && filters.from > filters.to) {
+    return { error: "From date cannot be after to date." };
+  }
+
+  return {
+    filters,
+    hasFilters: Boolean(filters.type || filters.from || filters.to)
+  };
+}
+
+function buildSqliteListWhere({ userId, type, from, to }) {
+  const parts = [];
+  const params = [];
+  if (userId) {
+    parts.push("user_id = ?");
+    params.push(userId);
+  }
+  if (type) {
+    parts.push("type = ?");
+    params.push(type);
+  }
+  if (from) {
+    parts.push("date >= ?");
+    params.push(from);
+  }
+  if (to) {
+    parts.push("date <= ?");
+    params.push(to);
+  }
+  return {
+    whereSql: parts.length ? `WHERE ${parts.join(" AND ")}` : "",
+    params
+  };
+}
+
+function buildPgListWhere({ userId, type, from, to }) {
+  const parts = [];
+  const params = [];
+  let index = 1;
+
+  if (userId) {
+    parts.push(`user_id = $${index++}`);
+    params.push(userId);
+  }
+  if (type) {
+    parts.push(`type = $${index++}`);
+    params.push(type);
+  }
+  if (from) {
+    parts.push(`date >= $${index++}`);
+    params.push(from);
+  }
+  if (to) {
+    parts.push(`date <= $${index++}`);
+    params.push(to);
+  }
+
+  return {
+    whereSql: parts.length ? `WHERE ${parts.join(" AND ")}` : "",
+    params,
+    nextIndex: index
+  };
+}
+
 function toMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
@@ -451,9 +538,8 @@ async function createSqliteStore() {
       sqlite.prepare("DELETE FROM transactions WHERE id = ? AND user_id = ?").run(transactionId, userId);
       return transaction;
     },
-    async listTransactions({ userId, page, limit }) {
-      const whereSql = userId ? "WHERE user_id = ?" : "";
-      const params = userId ? [userId] : [];
+    async listTransactions({ userId, page, limit, type = "", from = "", to = "" }) {
+      const { whereSql, params } = buildSqliteListWhere({ userId, type, from, to });
 
       if (page > 0 && limit > 0) {
         const safeLimit = Math.min(Math.max(limit, 1), 50);
@@ -643,10 +729,8 @@ async function createPostgresStore() {
       );
       return result.rows[0] || null;
     },
-    async listTransactions({ userId, page, limit }) {
-      const params = [];
-      const whereSql = userId ? "WHERE user_id = $1" : "";
-      if (userId) params.push(userId);
+    async listTransactions({ userId, page, limit, type = "", from = "", to = "" }) {
+      const { whereSql, params, nextIndex } = buildPgListWhere({ userId, type, from, to });
 
       if (page > 0 && limit > 0) {
         const safeLimit = Math.min(Math.max(limit, 1), 50);
@@ -661,7 +745,7 @@ async function createPostgresStore() {
         const itemResult = await pool.query(
           `SELECT * FROM transactions ${whereSql}
            ORDER BY date DESC, created_at DESC
-           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+           LIMIT $${nextIndex} OFFSET $${nextIndex + 1}`,
           [...params, safeLimit, offset]
         );
         return {
@@ -873,18 +957,35 @@ app.post("/api/transaction/delete", async (req, res) => {
   });
 });
 
-app.get("/api/transactions/list", async (req, res) => {
-  if (!req.query.user_id) {
-    return res.status(400).json({ error: "user_id is required." });
-  }
+app.get(
+  "/api/transactions/list",
+  asyncRoute(async (req, res) => {
+    if (!req.query.user_id) {
+      return res.status(400).json({ error: "user_id is required." });
+    }
 
-  const transactions = await store.listTransactions({
-    userId: req.query.user_id,
-    page: Number(req.query.page || 0),
-    limit: Number(req.query.limit || 0)
-  });
-  res.json(transactions);
-});
+    const user = await store.findUserById(req.query.user_id);
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    const parsed = parseTransactionListFilters(req.query, user.user_type);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const transactions = await store.listTransactions({
+      userId: req.query.user_id,
+      page: Number(req.query.page || 0),
+      limit: Number(req.query.limit || 0),
+      type: parsed.filters.type,
+      from: parsed.filters.from,
+      to: parsed.filters.to
+    });
+
+    res.json({
+      ...transactions,
+      filters: parsed.filters,
+      filtered: parsed.hasFilters
+    });
+  })
+);
 
 app.get(
   "/api/account/overview",

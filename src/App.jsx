@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api";
 
@@ -16,6 +16,12 @@ const TYPE_LABELS = {
   expense: "Expense",
   income: "Add Money"
 };
+
+const EMPTY_FILTERS = { type: "", from: "", to: "" };
+
+function hasActiveFilters(filters) {
+  return Boolean(filters.type || filters.from || filters.to);
+}
 
 function formatMoney(value) {
   return new Intl.NumberFormat("en-IN", {
@@ -380,24 +386,94 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
   );
 }
 
+function EntryFilters({ user, draft, onDraftChange, onApply, onClear, hasFilters, searching }) {
+  const types =
+    user.user_type === "business"
+      ? ["sale", "purchase", "expense", "income"]
+      : ["expense", "income"];
+
+  return (
+    <section className="entry-filters" aria-label="Filter entries">
+      <div className="section-heading">
+        <h2>Find Entries</h2>
+        {hasFilters ? (
+          <button className="text-button" type="button" onClick={onClear}>
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <div className="filter-types" role="group" aria-label="Entry type">
+        <button
+          type="button"
+          className={!draft.type ? "active" : ""}
+          onClick={() => onDraftChange({ ...draft, type: "" })}
+        >
+          All
+        </button>
+        {types.map((type) => (
+          <button
+            key={type}
+            type="button"
+            className={draft.type === type ? "active" : ""}
+            onClick={() => onDraftChange({ ...draft, type })}
+          >
+            {TYPE_LABELS[type]}
+          </button>
+        ))}
+      </div>
+      <div className="filter-dates">
+        <label>
+          From
+          <input
+            type="date"
+            value={draft.from}
+            onChange={(event) => onDraftChange({ ...draft, from: event.target.value })}
+          />
+        </label>
+        <label>
+          To
+          <input
+            type="date"
+            value={draft.to}
+            onChange={(event) => onDraftChange({ ...draft, to: event.target.value })}
+          />
+        </label>
+      </div>
+      <button className="secondary filter-search" type="button" disabled={searching} onClick={onApply}>
+        {searching ? "Searching..." : "Search"}
+      </button>
+    </section>
+  );
+}
+
 function TransactionList({
   transactions,
   total,
   hasMore,
   loadingMore,
+  loading,
+  hasFilters,
   onLoadMore,
   onDelete,
   deletingId,
   icons
 }) {
+  if (loading) {
+    return <p className="empty">Loading entries...</p>;
+  }
+
   if (!transactions.length) {
-    return <p className="empty">No entries yet. Add the first one above.</p>;
+    return (
+      <p className="empty">
+        {hasFilters ? "No entries match these filters." : "No entries yet. Add the first one above."}
+      </p>
+    );
   }
 
   return (
     <section className="transactions" aria-label="Recent transactions">
       <div className="section-heading">
-        <h2>Recent Entries</h2>
+        <h2>{hasFilters ? "Filtered Entries" : "Recent Entries"}</h2>
         <span>
           Showing {transactions.length} of {total}
         </span>
@@ -451,17 +527,29 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [listPage, setListPage] = useState(1);
   const [listMeta, setListMeta] = useState({ total: 0, total_pages: 1 });
   const [loadingMore, setLoadingMore] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [draftFilters, setDraftFilters] = useState(EMPTY_FILTERS);
+  const [appliedFilters, setAppliedFilters] = useState(EMPTY_FILTERS);
+  const skipFilterReload = useRef(true);
   const [activeType, setActiveType] = useState(user.user_type === "business" ? "sale" : "expense");
   const [deletingId, setDeletingId] = useState("");
   const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
   const transactionLimit = 5;
 
   const hasMore = listPage < listMeta.total_pages;
+  const filtersActive = hasActiveFilters(appliedFilters);
 
-  function fetchTransactionPage(page) {
-    return request(
-      `/transactions/list?user_id=${user.id}&page=${page}&limit=${transactionLimit}`
-    );
+  function fetchTransactionPage(page, filters = appliedFilters) {
+    const params = new URLSearchParams({
+      user_id: user.id,
+      page: String(page),
+      limit: String(transactionLimit)
+    });
+    if (filters.type) params.set("type", filters.type);
+    if (filters.from) params.set("from", filters.from);
+    if (filters.to) params.set("to", filters.to);
+    return request(`/transactions/list?${params}`);
   }
 
   function applyTransactionPage(data, page) {
@@ -473,9 +561,26 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     });
   }
 
-  async function loadInitialTransactions() {
-    const data = await fetchTransactionPage(1);
-    applyTransactionPage(data, 1);
+  async function loadInitialTransactions(filters = appliedFilters) {
+    setListLoading(true);
+    setListError("");
+    try {
+      const data = await fetchTransactionPage(1, filters);
+      applyTransactionPage(data, 1);
+    } catch (err) {
+      setListError(err.message || "Could not load entries.");
+    } finally {
+      setListLoading(false);
+    }
+  }
+
+  function applySearch() {
+    setAppliedFilters({ ...draftFilters });
+  }
+
+  function clearFilters() {
+    setDraftFilters(EMPTY_FILTERS);
+    setAppliedFilters(EMPTY_FILTERS);
   }
 
   async function reloadLoadedTransactions(pageCount = listPage) {
@@ -525,9 +630,17 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     try {
       await loadInitialTransactions();
     } catch (err) {
-      setError(err.message || "Could not load recent entries.");
+      setListError(err.message || "Could not load recent entries.");
     }
   }
+
+  useEffect(() => {
+    if (skipFilterReload.current) {
+      skipFilterReload.current = false;
+      return;
+    }
+    loadInitialTransactions(appliedFilters);
+  }, [appliedFilters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -725,11 +838,24 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
         </dl>
       </section>
 
+      <EntryFilters
+        user={user}
+        draft={draftFilters}
+        onDraftChange={setDraftFilters}
+        onApply={applySearch}
+        onClear={clearFilters}
+        hasFilters={filtersActive}
+        searching={listLoading}
+      />
+      {listError ? <p className="error inline-error">{listError}</p> : null}
+
       <TransactionList
         transactions={transactions}
         total={listMeta.total}
         hasMore={hasMore}
         loadingMore={loadingMore}
+        loading={listLoading}
+        hasFilters={filtersActive}
         onLoadMore={loadMore}
         onDelete={handleDelete}
         deletingId={deletingId}
