@@ -2,14 +2,19 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowDownCircle,
+  ArrowLeft,
   ArrowUpCircle,
+  BookUser,
   CircleDollarSign,
+  HandCoins,
   LogOut,
   Moon,
   MinusCircle,
   Plus,
   Sun,
-  Trash2
+  Trash2,
+  UserPlus,
+  Users
 } from "lucide-react";
 import "./styles.css";
 import App from "./App.jsx";
@@ -19,14 +24,19 @@ createRoot(document.getElementById("root")).render(
     <App
       icons={{
         ArrowDownCircle,
+        ArrowLeft,
         ArrowUpCircle,
+        BookUser,
         CircleDollarSign,
+        HandCoins,
         LogOut,
         Moon,
         MinusCircle,
         Plus,
         Sun,
-        Trash2
+        Trash2,
+        UserPlus,
+        Users
       }}
     />
   </React.StrictMode>

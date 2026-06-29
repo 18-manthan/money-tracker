@@ -16,9 +16,51 @@ const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Kolkata";
 const ALLOW_CREATE_USER = process.env.ALLOW_CREATE_USER === "true";
 
 const ALLOWED_TRANSACTION_TYPES = {
-  business: ["sale", "purchase", "expense", "income"],
+  business: [
+    "sale",
+    "purchase",
+    "expense",
+    "income",
+    "credit_sale",
+    "collection",
+    "credit_purchase",
+    "supplier_payment"
+  ],
   personal: ["expense", "income"]
 };
+
+const ALL_TRANSACTION_TYPES = [
+  "sale",
+  "purchase",
+  "expense",
+  "income",
+  "credit_sale",
+  "collection",
+  "credit_purchase",
+  "supplier_payment"
+];
+
+// Credit/udhaari types and which party-role they belong to.
+// `settles: true` means cash actually moves (payment in/out).
+const CREDIT_TYPES = {
+  credit_sale: { role: "customer", settles: false },
+  collection: { role: "customer", settles: true },
+  credit_purchase: { role: "supplier", settles: false },
+  supplier_payment: { role: "supplier", settles: true }
+};
+
+function emptyTotals() {
+  return {
+    sale: 0,
+    purchase: 0,
+    expense: 0,
+    income: 0,
+    credit_sale: 0,
+    collection: 0,
+    credit_purchase: 0,
+    supplier_payment: 0
+  };
+}
 
 const app = express();
 app.use(cors());
@@ -86,7 +128,7 @@ function parseTransactionListFilters(query, userType) {
   const filters = { type: "", from: "", to: "" };
 
   if (type) {
-    if (!["sale", "purchase", "expense", "income"].includes(type)) {
+    if (!ALL_TRANSACTION_TYPES.includes(type)) {
       return { error: "Invalid transaction type." };
     }
     if (userType && !isAllowedTransactionType(userType, type)) {
@@ -116,19 +158,19 @@ function buildSqliteListWhere({ userId, type, from, to }) {
   const parts = [];
   const params = [];
   if (userId) {
-    parts.push("user_id = ?");
+    parts.push("t.user_id = ?");
     params.push(userId);
   }
   if (type) {
-    parts.push("type = ?");
+    parts.push("t.type = ?");
     params.push(type);
   }
   if (from) {
-    parts.push("date >= ?");
+    parts.push("t.date >= ?");
     params.push(from);
   }
   if (to) {
-    parts.push("date <= ?");
+    parts.push("t.date <= ?");
     params.push(to);
   }
   return {
@@ -143,19 +185,19 @@ function buildPgListWhere({ userId, type, from, to }) {
   let index = 1;
 
   if (userId) {
-    parts.push(`user_id = $${index++}`);
+    parts.push(`t.user_id = $${index++}`);
     params.push(userId);
   }
   if (type) {
-    parts.push(`type = $${index++}`);
+    parts.push(`t.type = $${index++}`);
     params.push(type);
   }
   if (from) {
-    parts.push(`date >= $${index++}`);
+    parts.push(`t.date >= $${index++}`);
     params.push(from);
   }
   if (to) {
-    parts.push(`date <= $${index++}`);
+    parts.push(`t.date <= $${index++}`);
     params.push(to);
   }
 
@@ -199,7 +241,7 @@ function verifyPassword(password, user) {
 }
 
 function rowsToTotals(rows) {
-  const totals = { sale: 0, purchase: 0, expense: 0, income: 0 };
+  const totals = emptyTotals();
   for (const row of rows) {
     if (row.type in totals) totals[row.type] = toMoney(row.total);
   }
@@ -207,9 +249,9 @@ function rowsToTotals(rows) {
 }
 
 function splitAggregatedRows(rows) {
-  const allTime = { sale: 0, purchase: 0, expense: 0, income: 0 };
-  const current = { sale: 0, purchase: 0, expense: 0, income: 0 };
-  const previous = { sale: 0, purchase: 0, expense: 0, income: 0 };
+  const allTime = emptyTotals();
+  const current = emptyTotals();
+  const previous = emptyTotals();
 
   for (const row of rows) {
     if (!(row.type in allTime)) continue;
@@ -221,12 +263,24 @@ function splitAggregatedRows(rows) {
   return { allTime, current, previous };
 }
 
+// Cash-basis revenue = direct cash sales + udhaari collected.
+// Cash-basis cost = direct cash purchases + amounts paid to suppliers.
+function recognizedSales(totals) {
+  return toMoney(totals.sale + totals.collection);
+}
+
+function recognizedPurchases(totals) {
+  return toMoney(totals.purchase + totals.supplier_payment);
+}
+
 function calculateDashboardFromAccount(user, balance, totals) {
   const openingBalance = toMoney(balance?.opening_balance || 0);
-  const totalSales = totals.sale;
-  const totalPurchases = totals.purchase;
+  const totalSales = recognizedSales(totals);
+  const totalPurchases = recognizedPurchases(totals);
   const totalExpenses = totals.expense;
   const totalIncome = totals.income;
+  const receivable = toMoney(totals.credit_sale - totals.collection);
+  const payable = toMoney(totals.credit_purchase - totals.supplier_payment);
   const profitLoss = toMoney(totalSales - (totalPurchases + totalExpenses));
   const currentBalance =
     user.user_type === "business"
@@ -243,14 +297,20 @@ function calculateDashboardFromAccount(user, balance, totals) {
     total_purchases: totalPurchases,
     total_expenses: totalExpenses,
     total_income: totalIncome,
+    total_receivable: receivable,
+    total_payable: payable,
     profit_loss: profitLoss
   };
 }
 
 function monthlySummaryFromTotals(current, previous, userType = "business") {
   const currentMonthKey = localMonthKey();
-  const currentProfit = toMoney(current.sale - (current.purchase + current.expense));
-  const previousProfit = toMoney(previous.sale - (previous.purchase + previous.expense));
+  const currentSales = recognizedSales(current);
+  const currentPurchases = recognizedPurchases(current);
+  const previousSales = recognizedSales(previous);
+  const previousPurchases = recognizedPurchases(previous);
+  const currentProfit = toMoney(currentSales - (currentPurchases + current.expense));
+  const previousProfit = toMoney(previousSales - (previousPurchases + previous.expense));
   const difference = toMoney(currentProfit - previousProfit);
   const netCashFlow = toMoney(current.income - current.expense);
   const isPersonal = userType === "personal";
@@ -259,10 +319,12 @@ function monthlySummaryFromTotals(current, previous, userType = "business") {
     from: `${currentMonthKey}-01`,
     to: localTodayIso(),
     timezone: APP_TIMEZONE,
-    total_sales: current.sale,
-    total_purchases: current.purchase,
+    total_sales: currentSales,
+    total_purchases: currentPurchases,
     total_expenses: current.expense,
     total_income: current.income,
+    total_collection: current.collection,
+    total_supplier_payment: current.supplier_payment,
     net_profit_loss: isPersonal ? netCashFlow : currentProfit,
     net_cash_flow: netCashFlow,
     trend: difference > 0 ? "increase" : difference < 0 ? "decrease" : "no change",
@@ -276,15 +338,17 @@ function lastThreeDaysSummaryFromTotals(totals, userType = "business") {
     localTodayIso(new Date(Date.now() - 86_400_000)),
     localTodayIso()
   ];
+  const sales = recognizedSales(totals);
+  const purchases = recognizedPurchases(totals);
   const netCashFlow = toMoney(totals.income - totals.expense);
-  const netProfit = toMoney(totals.sale - (totals.purchase + totals.expense));
+  const netProfit = toMoney(sales - (purchases + totals.expense));
 
   return {
     from: allowedDates[0],
     to: localTodayIso(),
     timezone: APP_TIMEZONE,
-    total_sales: totals.sale,
-    total_purchases: totals.purchase,
+    total_sales: sales,
+    total_purchases: purchases,
     total_expenses: totals.expense,
     total_income: totals.income,
     net_profit_loss: userType === "personal" ? netCashFlow : netProfit,
@@ -347,34 +411,65 @@ async function createSqliteStore() {
     CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
+      type TEXT NOT NULL CHECK (type IN (
+        'sale', 'purchase', 'expense', 'income',
+        'credit_sale', 'collection', 'credit_purchase', 'supplier_payment'
+      )),
       amount REAL NOT NULL,
       description TEXT NOT NULL,
       date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      party_id TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS parties (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      phone TEXT,
+      role TEXT NOT NULL CHECK (role IN ('customer', 'supplier')),
       created_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_transactions_user_date
       ON transactions(user_id, date DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_parties_user
+      ON parties(user_id, role);
   `);
+
+  // Add party_id to older transactions tables (must happen before any
+  // index on party_id is created).
+  try {
+    sqlite.exec("ALTER TABLE transactions ADD COLUMN party_id TEXT");
+  } catch {
+    // Column already exists.
+  }
 
   const transactionTable = sqlite
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transactions'")
     .get();
-  if (transactionTable?.sql && !transactionTable.sql.includes("'income'")) {
+  if (transactionTable?.sql && !transactionTable.sql.includes("'credit_sale'")) {
+    // Rebuild to widen the type CHECK. Base columns only are copied; older
+    // rows never had a party, so party_id stays NULL.
     sqlite.exec(`
       PRAGMA foreign_keys = OFF;
+      DROP TABLE IF EXISTS transactions_old;
       ALTER TABLE transactions RENAME TO transactions_old;
 
       CREATE TABLE transactions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
+        type TEXT NOT NULL CHECK (type IN (
+          'sale', 'purchase', 'expense', 'income',
+          'credit_sale', 'collection', 'credit_purchase', 'supplier_payment'
+        )),
         amount REAL NOT NULL,
         description TEXT NOT NULL,
         date TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        party_id TEXT,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
@@ -384,11 +479,15 @@ async function createSqliteStore() {
 
       DROP TABLE transactions_old;
       PRAGMA foreign_keys = ON;
-
-      CREATE INDEX IF NOT EXISTS idx_transactions_user_date
-        ON transactions(user_id, date DESC, created_at DESC);
     `);
   }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_transactions_user_date
+      ON transactions(user_id, date DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_transactions_party
+      ON transactions(party_id);
+  `);
 
   function migrateLegacyJson() {
     if (!existsSync(LEGACY_JSON_FILE)) return;
@@ -516,8 +615,8 @@ async function createSqliteStore() {
     async addTransaction(transaction) {
       sqlite
         .prepare(
-          `INSERT INTO transactions (id, user_id, type, amount, description, date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO transactions (id, user_id, type, amount, description, date, created_at, party_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           transaction.id,
@@ -526,7 +625,8 @@ async function createSqliteStore() {
           transaction.amount,
           transaction.description,
           transaction.date,
-          transaction.created_at
+          transaction.created_at,
+          transaction.party_id || null
         );
     },
     async deleteTransaction({ userId, transactionId }) {
@@ -540,19 +640,25 @@ async function createSqliteStore() {
     },
     async listTransactions({ userId, page, limit, type = "", from = "", to = "" }) {
       const { whereSql, params } = buildSqliteListWhere({ userId, type, from, to });
+      const baseSelect = `
+        SELECT t.*, p.name AS party_name
+        FROM transactions t
+        LEFT JOIN parties p ON p.id = t.party_id
+        ${whereSql}
+      `;
 
       if (page > 0 && limit > 0) {
         const safeLimit = Math.min(Math.max(limit, 1), 50);
         const total = sqlite
-          .prepare(`SELECT COUNT(*) AS total FROM transactions ${whereSql}`)
+          .prepare(`SELECT COUNT(*) AS total FROM transactions t ${whereSql}`)
           .get(...params).total;
         const totalPages = Math.max(Math.ceil(total / safeLimit), 1);
         const safePage = Math.min(Math.max(page, 1), totalPages);
         const offset = (safePage - 1) * safeLimit;
         const items = sqlite
           .prepare(
-            `SELECT * FROM transactions ${whereSql}
-             ORDER BY date DESC, created_at DESC
+            `${baseSelect}
+             ORDER BY t.date DESC, t.created_at DESC
              LIMIT ? OFFSET ?`
           )
           .all(...params, safeLimit, offset);
@@ -560,8 +666,71 @@ async function createSqliteStore() {
       }
 
       return sqlite
-        .prepare(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, created_at DESC`)
+        .prepare(`${baseSelect} ORDER BY t.date DESC, t.created_at DESC`)
         .all(...params);
+    },
+    async createParty(party) {
+      sqlite
+        .prepare(
+          `INSERT INTO parties (id, user_id, name, phone, role, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(party.id, party.user_id, party.name, party.phone || null, party.role, party.created_at);
+    },
+    async findParty(userId, partyId) {
+      return sqlite
+        .prepare("SELECT * FROM parties WHERE id = ? AND user_id = ?")
+        .get(partyId, userId);
+    },
+    async findPartyByName(userId, role, name) {
+      return sqlite
+        .prepare(
+          "SELECT * FROM parties WHERE user_id = ? AND role = ? AND lower(name) = lower(?)"
+        )
+        .get(userId, role, name);
+    },
+    async listParties(userId, role) {
+      const params = [userId];
+      let roleSql = "";
+      if (role) {
+        roleSql = "AND p.role = ?";
+        params.push(role);
+      }
+      return sqlite
+        .prepare(
+          `SELECT p.*,
+                  COALESCE(SUM(CASE WHEN t.type = 'credit_sale' THEN t.amount
+                                    WHEN t.type = 'collection' THEN -t.amount ELSE 0 END), 0) AS receivable,
+                  COALESCE(SUM(CASE WHEN t.type = 'credit_purchase' THEN t.amount
+                                    WHEN t.type = 'supplier_payment' THEN -t.amount ELSE 0 END), 0) AS payable
+           FROM parties p
+           LEFT JOIN transactions t ON t.party_id = p.id AND t.user_id = p.user_id
+           WHERE p.user_id = ? ${roleSql}
+           GROUP BY p.id
+           ORDER BY p.name COLLATE NOCASE`
+        )
+        .all(...params);
+    },
+    async getPartyOutstanding(userId, partyId) {
+      const row = sqlite
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN type = 'credit_sale' THEN amount
+                               WHEN type = 'collection' THEN -amount ELSE 0 END), 0) AS receivable,
+             COALESCE(SUM(CASE WHEN type = 'credit_purchase' THEN amount
+                               WHEN type = 'supplier_payment' THEN -amount ELSE 0 END), 0) AS payable
+           FROM transactions
+           WHERE user_id = ? AND party_id = ?`
+        )
+        .get(userId, partyId);
+      return { receivable: toMoney(row.receivable), payable: toMoney(row.payable) };
+    },
+    async getPartyLedger(userId, partyId) {
+      return sqlite
+        .prepare(
+          "SELECT * FROM transactions WHERE user_id = ? AND party_id = ? ORDER BY date DESC, created_at DESC"
+        )
+        .all(userId, partyId);
     },
   };
 }
@@ -597,15 +766,34 @@ async function createPostgresStore() {
     CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      type TEXT NOT NULL CHECK (type IN ('sale', 'purchase', 'expense', 'income')),
+      type TEXT NOT NULL CHECK (type IN (
+        'sale', 'purchase', 'expense', 'income',
+        'credit_sale', 'collection', 'credit_purchase', 'supplier_payment'
+      )),
       amount DOUBLE PRECISION NOT NULL,
       description TEXT NOT NULL,
       date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      party_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parties (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      phone TEXT,
+      role TEXT NOT NULL CHECK (role IN ('customer', 'supplier')),
       created_at TEXT NOT NULL
     );
 
+    ALTER TABLE transactions ADD COLUMN IF NOT EXISTS party_id TEXT;
+
     CREATE INDEX IF NOT EXISTS idx_transactions_user_date
       ON transactions(user_id, date DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_transactions_party
+      ON transactions(party_id);
+    CREATE INDEX IF NOT EXISTS idx_parties_user
+      ON parties(user_id, role);
   `);
 
   await pool.query(`
@@ -627,7 +815,10 @@ async function createPostgresStore() {
 
       ALTER TABLE transactions
         ADD CONSTRAINT transactions_type_check
-        CHECK (type IN ('sale', 'purchase', 'expense', 'income'));
+        CHECK (type IN (
+          'sale', 'purchase', 'expense', 'income',
+          'credit_sale', 'collection', 'credit_purchase', 'supplier_payment'
+        ));
     EXCEPTION
       WHEN duplicate_object THEN
         NULL;
@@ -709,8 +900,8 @@ async function createPostgresStore() {
     },
     async addTransaction(transaction) {
       await pool.query(
-        `INSERT INTO transactions (id, user_id, type, amount, description, date, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        `INSERT INTO transactions (id, user_id, type, amount, description, date, created_at, party_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           transaction.id,
           transaction.user_id,
@@ -718,7 +909,8 @@ async function createPostgresStore() {
           transaction.amount,
           transaction.description,
           transaction.date,
-          transaction.created_at
+          transaction.created_at,
+          transaction.party_id || null
         ]
       );
     },
@@ -731,11 +923,17 @@ async function createPostgresStore() {
     },
     async listTransactions({ userId, page, limit, type = "", from = "", to = "" }) {
       const { whereSql, params, nextIndex } = buildPgListWhere({ userId, type, from, to });
+      const baseSelect = `
+        SELECT t.*, p.name AS party_name
+        FROM transactions t
+        LEFT JOIN parties p ON p.id = t.party_id
+        ${whereSql}
+      `;
 
       if (page > 0 && limit > 0) {
         const safeLimit = Math.min(Math.max(limit, 1), 50);
         const totalResult = await pool.query(
-          `SELECT COUNT(*)::int AS total FROM transactions ${whereSql}`,
+          `SELECT COUNT(*)::int AS total FROM transactions t ${whereSql}`,
           params
         );
         const total = totalResult.rows[0].total;
@@ -743,8 +941,8 @@ async function createPostgresStore() {
         const safePage = Math.min(Math.max(page, 1), totalPages);
         const offset = (safePage - 1) * safeLimit;
         const itemResult = await pool.query(
-          `SELECT * FROM transactions ${whereSql}
-           ORDER BY date DESC, created_at DESC
+          `${baseSelect}
+           ORDER BY t.date DESC, t.created_at DESC
            LIMIT $${nextIndex} OFFSET $${nextIndex + 1}`,
           [...params, safeLimit, offset]
         );
@@ -758,8 +956,72 @@ async function createPostgresStore() {
       }
 
       const result = await pool.query(
-        `SELECT * FROM transactions ${whereSql} ORDER BY date DESC, created_at DESC`,
+        `${baseSelect} ORDER BY t.date DESC, t.created_at DESC`,
         params
+      );
+      return result.rows;
+    },
+    async createParty(party) {
+      await pool.query(
+        `INSERT INTO parties (id, user_id, name, phone, role, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [party.id, party.user_id, party.name, party.phone || null, party.role, party.created_at]
+      );
+    },
+    async findParty(userId, partyId) {
+      const result = await pool.query(
+        "SELECT * FROM parties WHERE id = $1 AND user_id = $2",
+        [partyId, userId]
+      );
+      return result.rows[0] || null;
+    },
+    async findPartyByName(userId, role, name) {
+      const result = await pool.query(
+        "SELECT * FROM parties WHERE user_id = $1 AND role = $2 AND lower(name) = lower($3)",
+        [userId, role, name]
+      );
+      return result.rows[0] || null;
+    },
+    async listParties(userId, role) {
+      const params = [userId];
+      let roleSql = "";
+      if (role) {
+        roleSql = "AND p.role = $2";
+        params.push(role);
+      }
+      const result = await pool.query(
+        `SELECT p.*,
+                COALESCE(SUM(CASE WHEN t.type = 'credit_sale' THEN t.amount
+                                  WHEN t.type = 'collection' THEN -t.amount ELSE 0 END), 0) AS receivable,
+                COALESCE(SUM(CASE WHEN t.type = 'credit_purchase' THEN t.amount
+                                  WHEN t.type = 'supplier_payment' THEN -t.amount ELSE 0 END), 0) AS payable
+         FROM parties p
+         LEFT JOIN transactions t ON t.party_id = p.id AND t.user_id = p.user_id
+         WHERE p.user_id = $1 ${roleSql}
+         GROUP BY p.id
+         ORDER BY lower(p.name)`,
+        params
+      );
+      return result.rows;
+    },
+    async getPartyOutstanding(userId, partyId) {
+      const result = await pool.query(
+        `SELECT
+           COALESCE(SUM(CASE WHEN type = 'credit_sale' THEN amount
+                             WHEN type = 'collection' THEN -amount ELSE 0 END), 0) AS receivable,
+           COALESCE(SUM(CASE WHEN type = 'credit_purchase' THEN amount
+                             WHEN type = 'supplier_payment' THEN -amount ELSE 0 END), 0) AS payable
+         FROM transactions
+         WHERE user_id = $1 AND party_id = $2`,
+        [userId, partyId]
+      );
+      const row = result.rows[0] || { receivable: 0, payable: 0 };
+      return { receivable: toMoney(row.receivable), payable: toMoney(row.payable) };
+    },
+    async getPartyLedger(userId, partyId) {
+      const result = await pool.query(
+        "SELECT * FROM transactions WHERE user_id = $1 AND party_id = $2 ORDER BY date DESC, created_at DESC",
+        [userId, partyId]
       );
       return result.rows;
     },
@@ -799,6 +1061,24 @@ function createMissingDatabaseStore() {
       throw error;
     },
     async listTransactions() {
+      throw error;
+    },
+    async createParty() {
+      throw error;
+    },
+    async findParty() {
+      throw error;
+    },
+    async findPartyByName() {
+      throw error;
+    },
+    async listParties() {
+      throw error;
+    },
+    async getPartyOutstanding() {
+      throw error;
+    },
+    async getPartyLedger() {
       throw error;
     },
   };
@@ -890,18 +1170,21 @@ app.post("/api/auth/login", async (req, res) => {
 
 app.post("/api/transaction/add", async (req, res) => {
   const { user_id, type, amount, description = "", date = localTodayIso() } = req.body;
-  const cleanDescription = description.trim();
+  let cleanDescription = description.trim();
   const entryDate = String(date).trim();
 
   if (!user_id) return res.status(400).json({ error: "user_id is required." });
-  if (!["sale", "purchase", "expense", "income"].includes(type)) {
-    return res.status(400).json({ error: "Type must be sale, purchase, expense, or income." });
+  if (!ALL_TRANSACTION_TYPES.includes(type)) {
+    return res.status(400).json({ error: "Invalid transaction type." });
   }
   if (!requireAmount(amount)) {
     return res.status(400).json({ error: "Amount must be greater than 0." });
   }
+  // Payment entries (in/out) can default their description; goods entries cannot.
   if (!cleanDescription) {
-    return res.status(400).json({ error: "Description is required." });
+    if (type === "collection") cleanDescription = "Payment received";
+    else if (type === "supplier_payment") cleanDescription = "Payment paid";
+    else return res.status(400).json({ error: "Description is required." });
   }
   if (!isValidDateString(entryDate)) {
     return res.status(400).json({ error: "Date must be YYYY-MM-DD." });
@@ -918,6 +1201,39 @@ app.post("/api/transaction/add", async (req, res) => {
     });
   }
 
+  let partyId = null;
+  const creditMeta = CREDIT_TYPES[type];
+  if (creditMeta) {
+    const requestedPartyId = String(req.body.party_id || "").trim();
+    if (!requestedPartyId) {
+      return res.status(400).json({
+        error: creditMeta.role === "customer" ? "Select a customer." : "Select a supplier."
+      });
+    }
+    const party = await store.findParty(user_id, requestedPartyId);
+    if (!party) return res.status(404).json({ error: "Party not found." });
+    if (party.role !== creditMeta.role) {
+      return res.status(400).json({
+        error: `This entry needs a ${creditMeta.role}, not a ${party.role}.`
+      });
+    }
+    partyId = party.id;
+
+    // Block paying/collecting more than what is outstanding (no advances).
+    if (creditMeta.settles) {
+      const outstanding = await store.getPartyOutstanding(user_id, partyId);
+      const due = type === "collection" ? outstanding.receivable : outstanding.payable;
+      if (toMoney(amount) > toMoney(due)) {
+        return res.status(400).json({
+          error:
+            due <= 0
+              ? "Nothing is outstanding for this party."
+              : `Amount cannot exceed the outstanding ₹${toMoney(due)}.`
+        });
+      }
+    }
+  }
+
   const transaction = {
     id: id("txn"),
     user_id,
@@ -925,7 +1241,8 @@ app.post("/api/transaction/add", async (req, res) => {
     amount: toMoney(amount),
     description: cleanDescription,
     date: entryDate,
-    created_at: new Date().toISOString()
+    created_at: new Date().toISOString(),
+    party_id: partyId
   };
 
   await store.addTransaction(transaction);
@@ -983,6 +1300,103 @@ app.get(
       ...transactions,
       filters: parsed.filters,
       filtered: parsed.hasFilters
+    });
+  })
+);
+
+app.get(
+  "/api/parties",
+  asyncRoute(async (req, res) => {
+    if (!req.query.user_id) {
+      return res.status(400).json({ error: "user_id is required." });
+    }
+    const user = await store.findUserById(req.query.user_id);
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    const role = String(req.query.role || "").trim();
+    if (role && !["customer", "supplier"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role." });
+    }
+
+    const rows = await store.listParties(req.query.user_id, role || null);
+    const items = rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      phone: row.phone || "",
+      role: row.role,
+      created_at: row.created_at,
+      receivable: toMoney(row.receivable),
+      payable: toMoney(row.payable),
+      outstanding: toMoney(row.role === "supplier" ? row.payable : row.receivable)
+    }));
+    res.json({ items });
+  })
+);
+
+app.post(
+  "/api/parties",
+  asyncRoute(async (req, res) => {
+    const { user_id, name = "", phone = "", role } = req.body;
+    if (!user_id) return res.status(400).json({ error: "user_id is required." });
+
+    const user = await store.findUserById(user_id);
+    if (!user) return res.status(404).json({ error: "User not found." });
+    if (user.user_type !== "business") {
+      return res.status(400).json({ error: "Only business accounts can keep a khata." });
+    }
+
+    const cleanName = String(name).trim();
+    if (!cleanName) return res.status(400).json({ error: "Name is required." });
+    if (!["customer", "supplier"].includes(role)) {
+      return res.status(400).json({ error: "Role must be customer or supplier." });
+    }
+
+    const existing = await store.findPartyByName(user_id, role, cleanName);
+    if (existing) {
+      return res.status(409).json({ error: `A ${role} with this name already exists.` });
+    }
+
+    const party = {
+      id: id("pty"),
+      user_id,
+      name: cleanName,
+      phone: String(phone || "").trim(),
+      role,
+      created_at: new Date().toISOString()
+    };
+    await store.createParty(party);
+    res.status(201).json({ party: { ...party, receivable: 0, payable: 0, outstanding: 0 } });
+  })
+);
+
+app.get(
+  "/api/parties/ledger",
+  asyncRoute(async (req, res) => {
+    if (!req.query.user_id) {
+      return res.status(400).json({ error: "user_id is required." });
+    }
+    if (!req.query.party_id) {
+      return res.status(400).json({ error: "party_id is required." });
+    }
+
+    const party = await store.findParty(req.query.user_id, req.query.party_id);
+    if (!party) return res.status(404).json({ error: "Party not found." });
+
+    const outstanding = await store.getPartyOutstanding(req.query.user_id, req.query.party_id);
+    const transactions = await store.getPartyLedger(req.query.user_id, req.query.party_id);
+
+    res.json({
+      party: {
+        id: party.id,
+        name: party.name,
+        phone: party.phone || "",
+        role: party.role,
+        created_at: party.created_at,
+        receivable: outstanding.receivable,
+        payable: outstanding.payable,
+        outstanding: party.role === "supplier" ? outstanding.payable : outstanding.receivable
+      },
+      transactions
     });
   })
 );

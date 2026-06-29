@@ -603,6 +603,181 @@ dd {
   padding: 20px 0;
 }
 
+.txn.credit_sale {
+  border-left-color: #7c3aed;
+}
+
+.txn.collection {
+  border-left-color: var(--positive);
+}
+
+.txn.credit_purchase {
+  border-left-color: var(--purchase);
+}
+
+.txn.supplier_payment {
+  border-left-color: var(--negative);
+}
+
+.txn-party {
+  color: var(--brand-strong);
+  font-weight: 700;
+}
+
+.payment-mode {
+  margin-bottom: 10px;
+}
+
+.entry-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* Dashboard To Collect / To Pay cards */
+.khata-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.khata-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--soft-border);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.khata-card span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.khata-card strong {
+  font-size: 1.35rem;
+}
+
+.khata-card.to-collect strong {
+  color: var(--positive);
+}
+
+.khata-card.to-pay strong {
+  color: var(--negative);
+}
+
+/* Khata screen */
+.topbar-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.khata-hero strong.positive {
+  color: var(--positive-bright);
+}
+
+.khata-hero strong.negative {
+  color: var(--negative-bright);
+}
+
+.khata-list,
+.khata-detail {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.party-list {
+  display: grid;
+  gap: 8px;
+}
+
+.party-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--soft-border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.party-row strong {
+  display: block;
+}
+
+.party-row span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.party-row b.positive {
+  color: var(--positive);
+}
+
+.party-row b.negative {
+  color: var(--negative);
+}
+
+.party-row b.muted {
+  color: var(--muted);
+}
+
+.khata-phone {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.khata-outstanding {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--button-soft);
+}
+
+.khata-outstanding span {
+  color: var(--muted);
+  font-weight: 800;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+
+.khata-outstanding strong {
+  font-size: 1.25rem;
+}
+
+.khata-outstanding.positive strong {
+  color: var(--positive);
+}
+
+.khata-outstanding.negative strong {
+  color: var(--negative);
+}
+
 @media (min-width: 760px) {
   .app-shell {
     padding: 28px;
@@ -614,7 +789,8 @@ dd {
   }
 
   .entry-form .error,
-  .entry-form .add-button {
+  .entry-form .add-button,
+  .entry-form .entry-hint {
     grid-column: 1 / -1;
   }
 

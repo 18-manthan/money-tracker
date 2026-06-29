@@ -14,7 +14,11 @@ const TYPE_LABELS = {
   sale: "Sale",
   purchase: "Purchase",
   expense: "Expense",
-  income: "Add Money"
+  income: "Add Money",
+  credit_sale: "Credit Sale",
+  collection: "Payment In",
+  credit_purchase: "Credit Purchase",
+  supplier_payment: "Payment Out"
 };
 
 const EMPTY_FILTERS = { type: "", from: "", to: "" };
@@ -258,41 +262,92 @@ function AuthScreen({ onReady, theme, onThemeToggle, icons }) {
   );
 }
 
-function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
+function EntryForm({ user, activeType, setActiveType, onAdded, icons, parties, onCreateParty }) {
   const allowedTypes =
     user.user_type === "business"
       ? ["sale", "purchase", "expense", "income"]
       : ["expense", "income"];
   const [form, setForm] = useState({ amount: "", description: "", date: localTodayIso() });
+  const [paymentMode, setPaymentMode] = useState("cash");
+  const [partyName, setPartyName] = useState("");
+  const [partyPhone, setPartyPhone] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const canCredit = activeType === "sale" || activeType === "purchase";
+  const partyRole = activeType === "sale" ? "customer" : "supplier";
+  const isCredit = canCredit && paymentMode === "credit";
+  const roleParties = (parties || []).filter((party) => party.role === partyRole);
 
   useEffect(() => {
     if (!allowedTypes.includes(activeType)) setActiveType("expense");
   }, [activeType, allowedTypes, setActiveType]);
 
+  useEffect(() => {
+    setPaymentMode("cash");
+    setPartyName("");
+    setPartyPhone("");
+    setError("");
+  }, [activeType]);
+
   async function submit(event) {
     event.preventDefault();
     setError("");
-    if (activeType === "income") {
+
+    let effectiveType = activeType;
+    let partyId = null;
+
+    if (isCredit) {
+      effectiveType = activeType === "sale" ? "credit_sale" : "credit_purchase";
+      const trimmed = partyName.trim();
+      if (!trimmed) {
+        setError(`Enter the ${partyRole} name.`);
+        return;
+      }
+      const existing = roleParties.find(
+        (party) => party.name.toLowerCase() === trimmed.toLowerCase()
+      );
+      setSaving(true);
+      try {
+        if (existing) {
+          partyId = existing.id;
+        } else {
+          const created = await onCreateParty({
+            name: trimmed,
+            role: partyRole,
+            phone: partyPhone.trim()
+          });
+          partyId = created.id;
+        }
+      } catch (err) {
+        setError(err.message);
+        setSaving(false);
+        return;
+      }
+    } else if (activeType === "income") {
       const confirmed = window.confirm(
         `Add ${formatMoney(form.amount)} to your balance as "${form.description}"? This will increase balance but will not count as profit.`
       );
       if (!confirmed) return;
     }
+
     setSaving(true);
     try {
       const result = await request("/transaction/add", {
         method: "POST",
         body: JSON.stringify({
           user_id: user.id,
-          type: activeType,
+          type: effectiveType,
           amount: form.amount,
           description: form.description,
-          date: form.date
+          date: form.date,
+          party_id: partyId
         })
       });
       setForm({ amount: "", description: "", date: localTodayIso() });
+      setPartyName("");
+      setPartyPhone("");
+      setPaymentMode("cash");
       onAdded(result);
     } catch (err) {
       setError(err.message);
@@ -301,12 +356,12 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
     }
   }
 
-  const labels = {
-    sale: "Sale",
-    purchase: "Purchase",
-    expense: "Expense",
-    income: "Add Money"
-  };
+  const labels = TYPE_LABELS;
+  const submitLabel = isCredit
+    ? activeType === "sale"
+      ? "Add Credit Sale"
+      : "Add Credit Purchase"
+    : `Add ${labels[activeType]}`;
 
   return (
     <section className="entry-panel" aria-label="Add entry">
@@ -335,6 +390,25 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
         })}
       </div>
 
+      {canCredit ? (
+        <div className="segmented payment-mode" role="tablist" aria-label="Payment mode">
+          <button
+            type="button"
+            className={paymentMode === "cash" ? "active" : ""}
+            onClick={() => setPaymentMode("cash")}
+          >
+            Cash
+          </button>
+          <button
+            type="button"
+            className={paymentMode === "credit" ? "active" : ""}
+            onClick={() => setPaymentMode("credit")}
+          >
+            Udhaar
+          </button>
+        </div>
+      ) : null}
+
       <form className="entry-form" onSubmit={submit}>
         <label>
           Amount
@@ -350,6 +424,36 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
             required
           />
         </label>
+
+        {isCredit ? (
+          <>
+            <label>
+              {partyRole === "customer" ? "Customer" : "Supplier"}
+              <input
+                list="entry-party-list"
+                value={partyName}
+                onChange={(event) => setPartyName(event.target.value)}
+                placeholder={partyRole === "customer" ? "Customer name" : "Supplier name"}
+                required
+              />
+              <datalist id="entry-party-list">
+                {roleParties.map((party) => (
+                  <option key={party.id} value={party.name} />
+                ))}
+              </datalist>
+            </label>
+            <label>
+              Phone (optional)
+              <input
+                value={partyPhone}
+                onChange={(event) => setPartyPhone(event.target.value)}
+                placeholder="For new names only"
+                inputMode="tel"
+              />
+            </label>
+          </>
+        ) : null}
+
         <label>
           Description
           <input
@@ -362,7 +466,9 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
                   ? user.user_type === "business"
                     ? "Owner cash, capital"
                     : "Salary, bonus"
-                  : `${labels[activeType]} details`
+                  : isCredit
+                    ? "Goods given (kurti, set...)"
+                    : `${labels[activeType]} details`
             }
             required
           />
@@ -376,10 +482,17 @@ function EntryForm({ user, activeType, setActiveType, onAdded, icons }) {
             required
           />
         </label>
+        {isCredit ? (
+          <p className="entry-hint">
+            {partyRole === "customer"
+              ? "Goods given on udhaar. Cash & profit count only when payment is received."
+              : "Stock taken on udhaar. Cost counts only when you pay the supplier."}
+          </p>
+        ) : null}
         {error ? <p className="error">{error}</p> : null}
         <button className="primary add-button" type="submit" disabled={saving}>
           <icons.Plus size={20} />
-          {saving ? "Adding..." : `Add ${labels[activeType]}`}
+          {saving ? "Adding..." : submitLabel}
         </button>
       </form>
     </section>
@@ -482,7 +595,10 @@ function TransactionList({
         {transactions.map((txn) => (
           <article className={`txn ${txn.type}`} key={txn.id}>
             <div>
-              <strong>{TYPE_LABELS[txn.type] || txn.type}</strong>
+              <strong>
+                {TYPE_LABELS[txn.type] || txn.type}
+                {txn.party_name ? <span className="txn-party"> · {txn.party_name}</span> : null}
+              </strong>
               <span>{txn.description}</span>
               <time className="txn-meta" dateTime={txn.created_at || txn.date}>
                 {formatEntryDate(txn.date)}
@@ -520,6 +636,286 @@ function TransactionList({
   );
 }
 
+function KhataScreen({ user, icons, onBack, parties, reloadParties, onCreateParty, onChanged }) {
+  const [role, setRole] = useState("customer");
+  const [selectedId, setSelectedId] = useState("");
+  const [ledger, setLedger] = useState(null);
+  const [loadingLedger, setLoadingLedger] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [addForm, setAddForm] = useState({ name: "", phone: "" });
+  const [payForm, setPayForm] = useState({ amount: "", description: "", date: localTodayIso() });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const roleParties = (parties || []).filter((party) => party.role === role);
+  const totalOutstanding = roleParties.reduce((acc, party) => acc + Number(party.outstanding || 0), 0);
+  const isCustomer = role === "customer";
+
+  async function openParty(partyId) {
+    setSelectedId(partyId);
+    setError("");
+    setLoadingLedger(true);
+    setPayForm({ amount: "", description: "", date: localTodayIso() });
+    try {
+      const data = await request(`/parties/ledger?user_id=${user.id}&party_id=${partyId}`);
+      setLedger(data);
+    } catch (err) {
+      setError(err.message);
+      setLedger(null);
+    } finally {
+      setLoadingLedger(false);
+    }
+  }
+
+  function closeParty() {
+    setSelectedId("");
+    setLedger(null);
+    setError("");
+  }
+
+  function switchRole(nextRole) {
+    setRole(nextRole);
+    setShowAdd(false);
+    setAddForm({ name: "", phone: "" });
+    closeParty();
+  }
+
+  async function submitAddParty(event) {
+    event.preventDefault();
+    setError("");
+    const name = addForm.name.trim();
+    if (!name) {
+      setError(`Enter the ${role} name.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreateParty({ name, role, phone: addForm.phone.trim() });
+      setAddForm({ name: "", phone: "" });
+      setShowAdd(false);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitPayment(event) {
+    event.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await request("/transaction/add", {
+        method: "POST",
+        body: JSON.stringify({
+          user_id: user.id,
+          type: isCustomer ? "collection" : "supplier_payment",
+          amount: payForm.amount,
+          description: payForm.description,
+          date: payForm.date,
+          party_id: selectedId
+        })
+      });
+      await reloadParties();
+      await openParty(selectedId);
+      onChanged?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="topbar-title">
+          <button className="icon-button" type="button" onClick={onBack} title="Back">
+            <icons.ArrowLeft size={20} />
+          </button>
+          <div>
+            <span>Khata</span>
+            <h1>Udhaar Book</h1>
+          </div>
+        </div>
+      </header>
+
+      <div className="segmented" role="tablist" aria-label="Khata type">
+        <button
+          type="button"
+          className={isCustomer ? "active" : ""}
+          onClick={() => switchRole("customer")}
+        >
+          To Collect
+        </button>
+        <button
+          type="button"
+          className={!isCustomer ? "active" : ""}
+          onClick={() => switchRole("supplier")}
+        >
+          To Pay
+        </button>
+      </div>
+
+      <section className="hero-balance khata-hero">
+        <span>{isCustomer ? "Total To Collect" : "Total To Pay"}</span>
+        <strong className={isCustomer ? "positive" : "negative"}>
+          {formatMoney(totalOutstanding)}
+        </strong>
+        <em>
+          {roleParties.length} {isCustomer ? "customer" : "supplier"}
+          {roleParties.length === 1 ? "" : "s"}
+        </em>
+      </section>
+
+      {error && !selectedId ? <p className="error inline-error">{error}</p> : null}
+
+      {selectedId && ledger ? (
+        <section className="khata-detail">
+          <div className="section-heading">
+            <h2>{ledger.party.name}</h2>
+            <button className="text-button" type="button" onClick={closeParty}>
+              Back to list
+            </button>
+          </div>
+          {ledger.party.phone ? <p className="khata-phone">{ledger.party.phone}</p> : null}
+          <div className={`khata-outstanding ${isCustomer ? "positive" : "negative"}`}>
+            <span>{isCustomer ? "Owes you" : "You owe"}</span>
+            <strong>{formatMoney(ledger.party.outstanding)}</strong>
+          </div>
+
+          <form className="entry-form khata-pay" onSubmit={submitPayment}>
+            <label>
+              {isCustomer ? "Receive payment" : "Pay supplier"}
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                inputMode="decimal"
+                value={payForm.amount}
+                onChange={(event) => setPayForm({ ...payForm, amount: event.target.value })}
+                placeholder="0"
+                required
+              />
+            </label>
+            <label>
+              Date
+              <input
+                type="date"
+                value={payForm.date}
+                onChange={(event) => setPayForm({ ...payForm, date: event.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Note (optional)
+              <input
+                value={payForm.description}
+                onChange={(event) => setPayForm({ ...payForm, description: event.target.value })}
+                placeholder={isCustomer ? "Cash received" : "Cash paid"}
+              />
+            </label>
+            {error ? <p className="error">{error}</p> : null}
+            <button className="primary add-button" type="submit" disabled={busy}>
+              <icons.HandCoins size={20} />
+              {busy ? "Saving..." : isCustomer ? "Receive Payment" : "Pay Supplier"}
+            </button>
+          </form>
+
+          <div className="section-heading">
+            <h2>Ledger</h2>
+          </div>
+          {loadingLedger ? (
+            <p className="empty">Loading...</p>
+          ) : ledger.transactions.length ? (
+            <div className="txn-list">
+              {ledger.transactions.map((txn) => (
+                <article className={`txn ${txn.type}`} key={txn.id}>
+                  <div>
+                    <strong>{TYPE_LABELS[txn.type] || txn.type}</strong>
+                    <span>{txn.description}</span>
+                    <time className="txn-meta" dateTime={txn.created_at || txn.date}>
+                      {formatEntryDate(txn.date)}
+                      {txn.created_at ? ` · ${formatEntryTime(txn.created_at)}` : ""}
+                    </time>
+                  </div>
+                  <div className="txn-actions">
+                    <b>{formatMoney(txn.amount)}</b>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="empty">No entries yet.</p>
+          )}
+        </section>
+      ) : (
+        <section className="khata-list">
+          <div className="section-heading">
+            <h2>{isCustomer ? "Customers" : "Suppliers"}</h2>
+            <button className="text-button" type="button" onClick={() => setShowAdd((value) => !value)}>
+              {showAdd ? "Cancel" : "+ Add"}
+            </button>
+          </div>
+
+          {showAdd ? (
+            <form className="entry-form khata-add" onSubmit={submitAddParty}>
+              <label>
+                Name
+                <input
+                  value={addForm.name}
+                  onChange={(event) => setAddForm({ ...addForm, name: event.target.value })}
+                  placeholder={isCustomer ? "Customer name" : "Supplier name"}
+                  required
+                />
+              </label>
+              <label>
+                Phone (optional)
+                <input
+                  value={addForm.phone}
+                  onChange={(event) => setAddForm({ ...addForm, phone: event.target.value })}
+                  inputMode="tel"
+                  placeholder="Phone number"
+                />
+              </label>
+              {error ? <p className="error">{error}</p> : null}
+              <button className="primary add-button" type="submit" disabled={busy}>
+                <icons.UserPlus size={20} />
+                {busy ? "Adding..." : `Add ${isCustomer ? "Customer" : "Supplier"}`}
+              </button>
+            </form>
+          ) : null}
+
+          {roleParties.length ? (
+            <div className="party-list">
+              {roleParties.map((party) => (
+                <button
+                  type="button"
+                  className="party-row"
+                  key={party.id}
+                  onClick={() => openParty(party.id)}
+                >
+                  <div>
+                    <strong>{party.name}</strong>
+                    {party.phone ? <span>{party.phone}</span> : null}
+                  </div>
+                  <b className={Number(party.outstanding) > 0 ? (isCustomer ? "positive" : "negative") : "muted"}>
+                    {formatMoney(party.outstanding)}
+                  </b>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="empty">
+              No {isCustomer ? "customers" : "suppliers"} yet. Add one to start a khata.
+            </p>
+          )}
+        </section>
+      )}
+    </main>
+  );
+}
+
 function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [dashboard, setDashboard] = useState(null);
   const [summary, setSummary] = useState(null);
@@ -535,7 +931,29 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
   const [deletingId, setDeletingId] = useState("");
   const [error, setError] = useState("");
   const [listError, setListError] = useState("");
+  const [parties, setParties] = useState([]);
+  const [view, setView] = useState("home");
+  const isBusiness = user.user_type === "business";
   const transactionLimit = 5;
+
+  async function reloadParties() {
+    if (!isBusiness) return;
+    try {
+      const data = await request(`/parties?user_id=${user.id}`);
+      setParties(Array.isArray(data?.items) ? data.items : []);
+    } catch {
+      // Khata is non-critical for the main dashboard; ignore load errors here.
+    }
+  }
+
+  async function createParty({ name, role, phone }) {
+    const data = await request("/parties", {
+      method: "POST",
+      body: JSON.stringify({ user_id: user.id, name, role, phone })
+    });
+    await reloadParties();
+    return data.party;
+  }
 
   const hasMore = listPage < listMeta.total_pages;
   const filtersActive = hasActiveFilters(appliedFilters);
@@ -655,6 +1073,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
         setDashboard(overview.dashboard);
         setSummary(overview.summary);
         await loadInitialTransactions();
+        await reloadParties();
       } catch (err) {
         if (!cancelled) {
           setError(err.message || "Could not load dashboard.");
@@ -704,6 +1123,7 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     setDashboard(result.dashboard);
     setSummary(result.summary);
     loadInitialTransactions().catch((err) => setError(err.message));
+    reloadParties();
   }
 
   async function handleDelete(txn) {
@@ -747,6 +1167,23 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
     return <main className="app-shell loading">Loading dashboard...</main>;
   }
 
+  if (isBusiness && view === "khata") {
+    return (
+      <KhataScreen
+        user={user}
+        icons={icons}
+        onBack={() => setView("home")}
+        parties={parties}
+        reloadParties={reloadParties}
+        onCreateParty={createParty}
+        onChanged={() => {
+          loadOverview().catch((err) => setError(err.message));
+          loadInitialTransactions().catch(() => {});
+        }}
+      />
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -755,6 +1192,16 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
           <h1>{user.name}</h1>
         </div>
         <div className="topbar-actions">
+          {isBusiness ? (
+            <button
+              className="icon-button"
+              onClick={() => setView("khata")}
+              type="button"
+              title="Khata / Udhaar"
+            >
+              <icons.BookUser size={20} />
+            </button>
+          ) : null}
           <ThemeToggle theme={theme} onToggle={onThemeToggle} icons={icons} />
           <button className="icon-button" onClick={onReset} type="button" title="Logout">
             <icons.LogOut size={20} />
@@ -782,7 +1229,34 @@ function Dashboard({ user, icons, onReset, theme, onThemeToggle }) {
         setActiveType={setActiveType}
         onAdded={handleAdded}
         icons={icons}
+        parties={parties}
+        onCreateParty={createParty}
       />
+
+      {isBusiness ? (
+        <section className="khata-cards">
+          <button
+            type="button"
+            className="khata-card to-collect"
+            onClick={() => setView("khata")}
+          >
+            <span>
+              <icons.Users size={16} /> To Collect
+            </span>
+            <strong>{formatMoney(dashboard.total_receivable || 0)}</strong>
+          </button>
+          <button
+            type="button"
+            className="khata-card to-pay"
+            onClick={() => setView("khata")}
+          >
+            <span>
+              <icons.HandCoins size={16} /> To Pay
+            </span>
+            <strong>{formatMoney(dashboard.total_payable || 0)}</strong>
+          </button>
+        </section>
+      ) : null}
 
       <section className="grid-stats">
         <Stat
